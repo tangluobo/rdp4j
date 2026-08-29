@@ -1,5 +1,9 @@
 package com.tangluobo.tomato.rdp;
 
+import java.awt.AlphaComposite;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.nio.IntBuffer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -9,14 +13,23 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 
+import com.tangluobo.tomato.rdp.graphics.RdpCursor;
+import com.tangluobo.tomato.rdp.graphics.WrappedImage;
+
 import javafx.application.Platform;
 import javafx.embed.swing.SwingNode;
 import javafx.animation.PauseTransition;
 import javafx.animation.TranslateTransition;
+import javafx.geometry.Dimension2D;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
+import javafx.scene.Cursor;
+import javafx.scene.ImageCursor;
+import javafx.scene.image.PixelBuffer;
+import javafx.scene.image.PixelFormat;
+import javafx.scene.image.WritableImage;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
@@ -233,6 +246,13 @@ public class RdpPane extends BorderPane {
             // 组合中的拼音仍只在本地输入法中处理，不会提前发送到远端。
             displayComponent.enableInputMethods(true);
 
+			// SwingNode maps AWT custom cursors to Cursor.DEFAULT. RDP pointer
+			// shapes (including window-edge resize arrows) are all custom images,
+			// so pass their source image directly to JavaFX instead.
+			if (displayComponent instanceof WrappedImage wrappedImage) {
+				wrappedImage.setRdpCursorListener(this::updateFxCursor);
+			}
+
             // 在EDT上用JScrollPane包装显示组件（WrappedImage实现了Scrollable）
             SwingUtilities.invokeLater(() -> {
                 displayComponent.setSize(displayComponent.getPreferredSize());
@@ -284,6 +304,157 @@ public class RdpPane extends BorderPane {
             }
         });
     }
+
+	private void updateFxCursor(RdpCursor rdpCursor) {
+		Platform.runLater(() -> applyFxCursor(rdpCursor));
+	}
+
+	private void applyFxCursor(RdpCursor rdpCursor) {
+		if (rdpCursor == null || rdpCursor.getData() == null) {
+			swingNode.setCursor(Cursor.DEFAULT);
+			return;
+		}
+
+		java.awt.Image awtImage = rdpCursor.getData();
+		int width = awtImage.getWidth(null);
+		int height = awtImage.getHeight(null);
+		if (width <= 0 || height <= 0) {
+			return;
+		}
+		Dimension2D bestSize = ImageCursor.getBestSize(width, height);
+		int targetWidth = bestSize.getWidth() > 0 ? (int) Math.round(bestSize.getWidth()) : width;
+		int targetHeight = bestSize.getHeight() > 0 ? (int) Math.round(bestSize.getHeight()) : height;
+		WritableImage fxImage = createFxCursorImage(awtImage, targetWidth, targetHeight);
+		double hotspotX = Math.max(0, Math.min(
+				rdpCursor.getHotspot().x * (double) targetWidth / width, targetWidth - 1));
+		double hotspotY = Math.max(0, Math.min(
+				rdpCursor.getHotspot().y * (double) targetHeight / height, targetHeight - 1));
+		swingNode.setCursor(new ImageCursor(fxImage, hotspotX, hotspotY));
+	}
+
+	static WritableImage createFxCursorImage(java.awt.Image awtImage, int width, int height) {
+		int sourceWidth = awtImage.getWidth(null);
+		int sourceHeight = awtImage.getHeight(null);
+		if (sourceWidth <= 0 || sourceHeight <= 0 || width <= 0 || height <= 0) {
+			throw new IllegalArgumentException("Cursor dimensions must be positive");
+		}
+		BufferedImage source = new BufferedImage(sourceWidth, sourceHeight,
+				BufferedImage.TYPE_INT_ARGB);
+		Graphics2D graphics = source.createGraphics();
+		try {
+			graphics.setComposite(AlphaComposite.Src);
+			graphics.drawImage(awtImage, 0, 0, null);
+		} finally {
+			graphics.dispose();
+		}
+
+		// Windows reports a 48x48 native cursor on a 150% display while many RDP
+		// servers still transmit a 32x32 pointer. Nearest-neighbour 32->48 scaling
+		// makes vertical edges look sharp but gives diagonals uneven 1/2-pixel
+		// steps. Resample straight ARGB as premultiplied color with Lanczos3, then
+		// hand the premultiplied integers directly to Glass. This smooths diagonal
+		// coverage without introducing dark fringes around transparent pixels.
+		int[] pixels = resampleCursorArgbPre(source, width, height);
+		PixelBuffer<IntBuffer> pixelBuffer = new PixelBuffer<>(width, height,
+				IntBuffer.wrap(pixels), PixelFormat.getIntArgbPreInstance());
+		return new WritableImage(pixelBuffer);
+	}
+
+	private static int[] resampleCursorArgbPre(BufferedImage source, int targetWidth,
+			int targetHeight) {
+		int sourceWidth = source.getWidth();
+		int sourceHeight = source.getHeight();
+		int[] sourcePixels = source.getRGB(0, 0, sourceWidth, sourceHeight,
+				null, 0, sourceWidth);
+		double[] horizontal = new double[sourceHeight * targetWidth * 4];
+		double scaleX = sourceWidth / (double) targetWidth;
+		double filterScaleX = Math.max(1.0, scaleX);
+		double radiusX = 3.0 * filterScaleX;
+
+		for (int y = 0; y < sourceHeight; y++) {
+			for (int targetX = 0; targetX < targetWidth; targetX++) {
+				double sourceX = (targetX + 0.5) * scaleX - 0.5;
+				int first = (int) Math.ceil(sourceX - radiusX);
+				int last = (int) Math.floor(sourceX + radiusX);
+				double weightSum = 0;
+				double alpha = 0;
+				double red = 0;
+				double green = 0;
+				double blue = 0;
+				for (int sampleX = first; sampleX <= last; sampleX++) {
+					double weight = lanczos3((sourceX - sampleX) / filterScaleX);
+					if (weight == 0) continue;
+					int clampedX = Math.max(0, Math.min(sourceWidth - 1, sampleX));
+					int argb = sourcePixels[y * sourceWidth + clampedX];
+					double sampleAlpha = ((argb >>> 24) & 0xff) / 255.0;
+					weightSum += weight;
+					alpha += weight * sampleAlpha;
+					red += weight * ((argb >>> 16) & 0xff) / 255.0 * sampleAlpha;
+					green += weight * ((argb >>> 8) & 0xff) / 255.0 * sampleAlpha;
+					blue += weight * (argb & 0xff) / 255.0 * sampleAlpha;
+				}
+				int offset = (y * targetWidth + targetX) * 4;
+				horizontal[offset] = alpha / weightSum;
+				horizontal[offset + 1] = red / weightSum;
+				horizontal[offset + 2] = green / weightSum;
+				horizontal[offset + 3] = blue / weightSum;
+			}
+		}
+
+		int[] result = new int[targetWidth * targetHeight];
+		double scaleY = sourceHeight / (double) targetHeight;
+		double filterScaleY = Math.max(1.0, scaleY);
+		double radiusY = 3.0 * filterScaleY;
+		for (int targetY = 0; targetY < targetHeight; targetY++) {
+			double sourceY = (targetY + 0.5) * scaleY - 0.5;
+			int first = (int) Math.ceil(sourceY - radiusY);
+			int last = (int) Math.floor(sourceY + radiusY);
+			for (int x = 0; x < targetWidth; x++) {
+				double weightSum = 0;
+				double alpha = 0;
+				double red = 0;
+				double green = 0;
+				double blue = 0;
+				for (int sampleY = first; sampleY <= last; sampleY++) {
+					double weight = lanczos3((sourceY - sampleY) / filterScaleY);
+					if (weight == 0) continue;
+					int clampedY = Math.max(0, Math.min(sourceHeight - 1, sampleY));
+					int offset = (clampedY * targetWidth + x) * 4;
+					weightSum += weight;
+					alpha += weight * horizontal[offset];
+					red += weight * horizontal[offset + 1];
+					green += weight * horizontal[offset + 2];
+					blue += weight * horizontal[offset + 3];
+				}
+				double premultipliedAlpha = clamp01(alpha / weightSum);
+				int a = toByte(premultipliedAlpha);
+				int r = toByte(Math.min(premultipliedAlpha,
+						Math.max(0, red / weightSum)));
+				int g = toByte(Math.min(premultipliedAlpha,
+						Math.max(0, green / weightSum)));
+				int b = toByte(Math.min(premultipliedAlpha,
+						Math.max(0, blue / weightSum)));
+				result[targetY * targetWidth + x] = (a << 24) | (r << 16) | (g << 8) | b;
+			}
+		}
+		return result;
+	}
+
+	private static double lanczos3(double value) {
+		double x = Math.abs(value);
+		if (x < 1.0e-9) return 1;
+		if (x >= 3) return 0;
+		double piX = Math.PI * x;
+		return (Math.sin(piX) / piX) * (Math.sin(piX / 3) / (piX / 3));
+	}
+
+	private static double clamp01(double value) {
+		return Math.max(0, Math.min(1, value));
+	}
+
+	private static int toByte(double value) {
+		return (int) Math.round(clamp01(value) * 255);
+	}
 
     /**
      * 断开连接

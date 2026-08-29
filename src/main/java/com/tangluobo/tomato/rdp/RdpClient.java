@@ -489,7 +489,7 @@ public class RdpClient {
         }
     }
 
-    /** Registers the MS-RDPEDYC transport used by the RDP Graphics Pipeline. */
+    /** Registers MS-RDPEDYC for the graphics pipeline and high-resolution cursors. */
     private void registerGraphicsChannel(VChannels channels) {
         try {
             channels.register(new DrdynvcChannel(() -> {

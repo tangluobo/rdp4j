@@ -106,6 +106,8 @@ public class Rdp implements Layer<Layer<?>> {
 	private static final int RDP_CAPLEN_GENERAL = 24;
 	private static final int RDP_CAPLEN_GLYPHCACHE = 52;
 	private static final int RDP_CAPLEN_INPUT = 88;
+	private static final int RDP_CAPLEN_LARGE_POINTER = 6;
+	private static final int RDP_CAPLEN_MULTIFRAGMENT_UPDATE = 8;
 	private static final int RDP_CAPLEN_OFFSCREEN_BITMAP_CACHE = 12;
 	private static final int RDP_CAPLEN_ORDER = 88;
 	private static final int RDP_CAPLEN_POINTER = 10;
@@ -142,6 +144,10 @@ public class Rdp implements Layer<Layer<?>> {
 	private static final int RDP_CAPSET_SURFACE_COMMANDS = 0x1C; // 28
 	private static final int RDP_CAPSET_VIRTUAL_CHANNELS = 0x14; // 20
 	private static final int RDP_CAPSET_WINDOW_LIST = 0x18; // 24
+	private static final int LARGE_POINTER_FLAG_96X96 = 0x0001;
+	private static final int LARGE_POINTER_FLAG_384X384 = 0x0002;
+	private static final int LARGE_POINTER_MAX_REQUEST_SIZE_96X96 = 38_055;
+	private static final int LARGE_POINTER_MAX_REQUEST_SIZE_384X384 = 608_299;
 	// Control PDU types
 	private static final int RDP_CTL_COOPERATE = 4;
 	private static final int RDP_CTL_DETACH = 3;
@@ -160,6 +166,7 @@ public class Rdp implements Layer<Layer<?>> {
 	private static final int RDP_DATA_PDU_UPDATE = 2;
 	// System Pointer Types
 	private static final int RDP_NULL_POINTER = 0;
+	private static final int RDP_DEFAULT_POINTER = 0x00007F00;
 	private static final int RDP_PDU_CONFIRM_ACTIVE = 3;
 	private static final int RDP_PDU_DATA = 7;
 	private static final int RDP_PDU_DEACTIVATE_ALL = 6;
@@ -177,6 +184,8 @@ public class Rdp implements Layer<Layer<?>> {
 	// Update PDU Types
 	private static final int RDP_UPDATE_ORDERS = 0;
 	private static final int RDP_UPDATE_PALETTE = 2;
+	private int serverLargePointerFlags;
+	private int serverMultifragmentMaxRequestSize;
 	private static final int RDP_UPDATE_SYNCHRONIZE = 3;
 	// Input flags
 	private static final int INPUT_FLAG_SCANCODES = 0x0001;
@@ -544,12 +553,19 @@ public class Rdp implements Layer<Layer<?>> {
 				process_null_system_pointer_pdu(s);
 				break;
 			case 6: // default pointer
+				process_default_system_pointer_pdu();
 				break;
 			case 9:
 				process_colour_pointer_pdu(s);
 				break;
 			case 10:
 				process_cached_pointer_pdu(s);
+				break;
+			case 11:
+				process_colour_pointer_pdu_new(s);
+				break;
+			case 12:
+				process_colour_pointer_pdu_large(s);
 				break;
 			default:
 				logger.warn("Unimplemented RDP5 opcode " + type);
@@ -656,7 +672,7 @@ public class Rdp implements Layer<Layer<?>> {
 			data.copyToByteArray(mask, 0, data.getPosition(), masklen);
 			data.incrementPosition(masklen);
 		}
-		cursor = state.getCanvas().createCursor(x, y, width, height, mask, pixel, cache_idx, 24, true);
+		cursor = state.getCanvas().createCursor(x, y, width, height, mask, pixel, cache_idx, 24);
 		// logger.info("Creating and setting cursor " + cache_idx);
 		state.getCache().putCursor(cache_idx, cursor);
 		try {
@@ -690,8 +706,47 @@ public class Rdp implements Layer<Layer<?>> {
 			data.copyToByteArray(mask, 0, data.getPosition(), masklen);
 			data.incrementPosition(masklen);
 		}
-		cursor = state.getCanvas().createCursor(x, y, width, height, mask, pixel, cache_idx, xorBpp, false);
+		cursor = state.getCanvas().createCursor(x, y, width, height, mask, pixel, cache_idx, xorBpp);
 		state.getCache().putCursor(cache_idx, cursor);
+		try {
+			state.getCanvas().getDisplay().setCursor(cursor);
+		} catch (HeadlessException e) {
+			logger.debug("Cursor display is unavailable in headless mode");
+		}
+	}
+
+	/** Decode the 384x384-capable Fast-Path Large Pointer Update. */
+	protected void process_colour_pointer_pdu_large(Packet data) throws RdesktopException {
+		int xorBpp = data.getLittleEndian16();
+		int cacheIdx = data.getLittleEndian16();
+		int hotX = data.getLittleEndian16();
+		int hotY = data.getLittleEndian16();
+		int width = data.getLittleEndian16();
+		int height = data.getLittleEndian16();
+		long maskLength = Integer.toUnsignedLong(data.getLittleEndian32());
+		long pixelLength = Integer.toUnsignedLong(data.getLittleEndian32());
+		long required = maskLength + pixelLength;
+		if (maskLength > Integer.MAX_VALUE || pixelLength > Integer.MAX_VALUE
+				|| required > data.getEnd() - data.getPosition()) {
+			throw new RdesktopException("Large pointer bitmap data is incomplete");
+		}
+		byte[] pixel = new byte[(int) pixelLength];
+		byte[] mask = maskLength == 0 ? null : new byte[(int) maskLength];
+		if (pixel.length > 0) {
+			data.copyToByteArray(pixel, 0, data.getPosition(), pixel.length);
+			data.incrementPosition(pixel.length);
+		}
+		if (mask != null) {
+			data.copyToByteArray(mask, 0, data.getPosition(), mask.length);
+			data.incrementPosition(mask.length);
+		}
+		RdpCursor cursor = state.getCanvas().createCursor(hotX, hotY, width, height,
+				mask, pixel, cacheIdx, xorBpp);
+		if (cursor == null) {
+			throw new RdesktopException("Large pointer could not be decoded: "
+					+ width + "x" + height + "@" + xorBpp);
+		}
+		state.getCache().putCursor(cacheIdx, cursor);
 		try {
 			state.getCanvas().getDisplay().setCursor(cursor);
 		} catch (HeadlessException e) {
@@ -701,12 +756,12 @@ public class Rdp implements Layer<Layer<?>> {
 
 	/* Process a null system pointer PDU */
 	protected void process_null_system_pointer_pdu(Packet s) throws RdesktopException {
-		try {
-			state.getCanvas().getDisplay().setCursor(state.getCache().getCursor(0));
-		} catch (RdesktopException | HeadlessException e) {
-			// A null system pointer does not require cache entry zero to exist.
-			state.getCanvas().getDisplay().setCursor(null);
-		}
+		state.getCanvas().getDisplay().setCursor(state.getCanvas().getHiddenCursor());
+	}
+
+	/** Reset a custom remote pointer back to the platform default arrow. */
+	protected void process_default_system_pointer_pdu() {
+		state.getCanvas().getDisplay().setCursor(null);
 	}
 
 	protected void processBitmapUpdates(Packet data) throws RdesktopException {
@@ -867,6 +922,8 @@ public class Rdp implements Layer<Layer<?>> {
 	 *            position
 	 */
 	void processServerCaps(Packet data, int length) {
+		serverLargePointerFlags = 0;
+		serverMultifragmentMaxRequestSize = 0;
 		int n;
 		int next, start;
 		int ncapsets, capset_type, capset_length;
@@ -918,7 +975,11 @@ public class Rdp implements Layer<Layer<?>> {
 				logger.info("Unhandled CAPSET bitmap cache host");
 				break;
 			case RDP_CAPSET_LARGE_POINTER:
-				logger.info("Unhandled CAPSET large pointer");
+				if (capset_length >= RDP_CAPLEN_LARGE_POINTER) {
+					serverLargePointerFlags = data.getLittleEndian16();
+					logger.info("Server large-pointer flags=0x"
+							+ Integer.toHexString(serverLargePointerFlags));
+				}
 				break;
 			case RDP_CAPSET_INPUT:
 				logger.info("Unhandled CAPSET input");
@@ -933,7 +994,11 @@ public class Rdp implements Layer<Layer<?>> {
 				logger.info("Unhandled CAPSET compdesk");
 				break;
 			case RDP_CAPSET_MULTIFRAGMENT_UPDATE:
-				logger.info("Unhandled CAPSET multifragment");
+				if (capset_length >= RDP_CAPLEN_MULTIFRAGMENT_UPDATE) {
+					serverMultifragmentMaxRequestSize = data.getLittleEndian32();
+					logger.info("Server multifragment max request size="
+							+ Integer.toUnsignedString(serverMultifragmentMaxRequestSize));
+				}
 				break;
 			case RDP_CAPSET_SURFACE_COMMANDS:
 				logger.info("Unhandled CAPSET surface commands");
@@ -964,14 +1029,16 @@ public class Rdp implements Layer<Layer<?>> {
 	}
 
 	private void process_system_pointer_pdu(Packet data) {
-		int system_pointer_type = 0;
-		data.getLittleEndian16(system_pointer_type); // in_uint16(s,
-		// system_pointer_type);
+		// TS_SYSTEMPOINTERATTRIBUTE.systemPointerType is a 32-bit value.
+		int system_pointer_type = data.getLittleEndian32();
 		switch (system_pointer_type) {
 		case RDP_NULL_POINTER:
 			if (logger.isDebugEnabled())
 				logger.debug("RDP_NULL_POINTER");
-			state.getCanvas().getDisplay().setCursor(null);
+			state.getCanvas().getDisplay().setCursor(state.getCanvas().getHiddenCursor());
+			break;
+		case RDP_DEFAULT_POINTER:
+			process_default_system_pointer_pdu();
 			break;
 		default:
 			logger.warn("Unimplemented system pointer message 0x" + Integer.toHexString(system_pointer_type));
@@ -1258,6 +1325,24 @@ public class Rdp implements Layer<Layer<?>> {
 	}
 
 	private void sendConfirmActive() throws RdesktopException, IOException {
+		long serverMaxRequestSize = Integer.toUnsignedLong(serverMultifragmentMaxRequestSize);
+		int clientLargePointerFlags = 0;
+		int clientMultifragmentMaxRequestSize = 0;
+		if ((serverLargePointerFlags & LARGE_POINTER_FLAG_384X384) != 0
+				&& serverMaxRequestSize >= LARGE_POINTER_MAX_REQUEST_SIZE_384X384) {
+			clientLargePointerFlags = serverLargePointerFlags
+					& (LARGE_POINTER_FLAG_96X96 | LARGE_POINTER_FLAG_384X384);
+			clientMultifragmentMaxRequestSize = LARGE_POINTER_MAX_REQUEST_SIZE_384X384;
+		} else if ((serverLargePointerFlags & LARGE_POINTER_FLAG_96X96) != 0
+				&& serverMaxRequestSize >= LARGE_POINTER_MAX_REQUEST_SIZE_96X96) {
+			clientLargePointerFlags = LARGE_POINTER_FLAG_96X96;
+			clientMultifragmentMaxRequestSize = LARGE_POINTER_MAX_REQUEST_SIZE_96X96;
+		}
+		boolean enableLargePointer = clientLargePointerFlags != 0;
+		if (enableLargePointer) {
+			logger.info("Advertising large-pointer flags=0x{} with multifragment max request size={}",
+					Integer.toHexString(clientLargePointerFlags), clientMultifragmentMaxRequestSize);
+		}
 		int caplen = RDP_CAPLEN_GENERAL + // 1
 				RDP_CAPLEN_BITMAP + // 2
 				RDP_CAPLEN_ORDER + // 3
@@ -1273,7 +1358,10 @@ public class Rdp implements Layer<Layer<?>> {
 				RDP_CAPLEN_FONTS + // 13
 				RDP_CAPLEN_OFFSCREEN_BITMAP_CACHE + // 14
 				RDP_CAPLEN_VIRTUAL_CHANNELS + // 15
-				RDP_CAPLEN_BRUSH + // 15
+				RDP_CAPLEN_BRUSH + // 16
+				(enableLargePointer
+						? RDP_CAPLEN_MULTIFRAGMENT_UPDATE + RDP_CAPLEN_LARGE_POINTER
+						: 0) +
 				4;
 		// for W2k.
 		// Purpose
@@ -1291,10 +1379,10 @@ public class Rdp implements Layer<Layer<?>> {
 		data.setLittleEndian16(caplen);
 		data.copyFromByteArray(RDP_SOURCE, 0, data.getPosition(), RDP_SOURCE.length);
 		data.incrementPosition(RDP_SOURCE.length);
-		// Sixteen capability sets are written below. The old value (15) left the
+		// Sixteen base capability sets are written below. The old value (15) left the
 		// final 8-byte Brush Capability Set outside combinedCapabilities, so
 		// strict servers rejected Confirm Active as eight bytes overlong.
-		data.setLittleEndian16(0x10); // num_caps
+		data.setLittleEndian16(enableLargePointer ? 0x12 : 0x10); // num_caps
 		data.incrementPosition(2); // pad
 		sendGeneralCaps(data); // 1
 		sendBitmapCaps(data); // 2
@@ -1316,6 +1404,10 @@ public class Rdp implements Layer<Layer<?>> {
 		sendOffscreenBitmapCacheCaps(data); // 14
 		sendVirtualChannelCaps(data); // 15
 		sendBrushCaps(data); // 16
+		if (enableLargePointer) {
+			sendMultifragmentUpdateCaps(data, clientMultifragmentMaxRequestSize); // 17
+			sendLargePointerCaps(data, clientLargePointerFlags); // 18
+		}
 		data.markEnd();
 		if (logger.isDebugEnabled())
 			logger.debug("confirm active");
@@ -1684,6 +1776,18 @@ public class Rdp implements Layer<Layer<?>> {
 				.getColorPointerCacheSize()); /* Color Pointer Cache size */
 		data.setLittleEndian16(
 				state.getPointerCacheSize()); /* Pointer (new) Cache size */
+	}
+
+	private void sendMultifragmentUpdateCaps(Packet data, int maxRequestSize) {
+		data.setLittleEndian16(RDP_CAPSET_MULTIFRAGMENT_UPDATE);
+		data.setLittleEndian16(RDP_CAPLEN_MULTIFRAGMENT_UPDATE);
+		data.setLittleEndian32(maxRequestSize);
+	}
+
+	private void sendLargePointerCaps(Packet data, int flags) {
+		data.setLittleEndian16(RDP_CAPSET_LARGE_POINTER);
+		data.setLittleEndian16(RDP_CAPLEN_LARGE_POINTER);
+		data.setLittleEndian16(flags);
 	}
 
 	private void sendShareCaps(Packet data) {

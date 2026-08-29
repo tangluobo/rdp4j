@@ -1,5 +1,6 @@
 package com.tangluobo.tomato.rdp;
 
+import java.awt.HeadlessException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -10,6 +11,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
 
+import com.tangluobo.tomato.rdp.graphics.RdpCursor;
 import com.tangluobo.tomato.rdp.rdp5.VChannel;
 import com.tangluobo.tomato.rdp.rdp5.VChannels;
 
@@ -28,8 +30,21 @@ final class DrdynvcChannel extends VChannel {
     private static final int CMD_CAPABILITY = 0x05;
 
     private static final String GFX_CHANNEL = "Microsoft::Windows::RDS::Graphics";
+    private static final String MOUSE_CURSOR_CHANNEL = "Microsoft::Windows::RDS::MouseCursor";
     private static final int STATUS_SUCCESS = 0;
     private static final int STATUS_NOT_FOUND = 0xC0000225;
+    private static final int MOUSE_CURSOR_PDU_CAPS_ADVERTISE = 0x01;
+    private static final int MOUSE_CURSOR_PDU_CAPS_CONFIRM = 0x02;
+    private static final int MOUSE_CURSOR_PDU_POINTER_UPDATE = 0x03;
+    private static final int MOUSE_CURSOR_UPDATE_HIDDEN = 0x05;
+    private static final int MOUSE_CURSOR_UPDATE_DEFAULT = 0x06;
+    private static final int MOUSE_CURSOR_UPDATE_POSITION = 0x08;
+    private static final int MOUSE_CURSOR_UPDATE_CACHED = 0x0A;
+    private static final int MOUSE_CURSOR_UPDATE_POINTER = 0x0B;
+    private static final int MOUSE_CURSOR_UPDATE_LARGE_POINTER = 0x0C;
+    private static final long MOUSE_CURSOR_CAPSET_SIGNATURE = 0x53504143L;
+    private static final long MOUSE_CURSOR_CAPSET_VERSION_1 = 1;
+    private static final long MOUSE_CURSOR_CAPSET_SIZE = 12;
     private static final int RDPGFX_CMDID_CAPS_ADVERTISE = 0x0012;
     private static final int RDPGFX_CMDID_WIRE_TO_SURFACE_1 = 0x0001;
     private static final int RDPGFX_CMDID_WIRE_TO_SURFACE_2 = 0x0002;
@@ -61,11 +76,10 @@ final class DrdynvcChannel extends VChannel {
     private ClearCodecDecoder clearCodecDecoder = new ClearCodecDecoder();
     private final Map<Integer, GfxSurface> surfaces = new HashMap<>();
     private final Map<Integer, GfxBitmapCacheEntry> bitmapCache = new HashMap<>();
+    private final Map<Integer, DynamicFragment> dynamicFragments = new HashMap<>();
     private final Set<Integer> dirtySurfaces = new LinkedHashSet<>();
     private int gfxChannelId = -1;
-    private int fragmentedChannelId = -1;
-    private int fragmentedLength;
-    private ByteArrayOutputStream fragmentedData;
+    private int mouseCursorChannelId = -1;
     private long totalFramesDecoded;
     private boolean firstFrameDelivered;
 
@@ -151,7 +165,9 @@ final class DrdynvcChannel extends VChannel {
             throw new RdesktopException("unterminated drdynvc channel name");
         }
         String channelName = nameBytes.toString(StandardCharsets.US_ASCII);
-        boolean accepted = GFX_CHANNEL.equals(channelName);
+        boolean graphicsChannel = GFX_CHANNEL.equals(channelName);
+        boolean mouseCursorChannel = MOUSE_CURSOR_CHANNEL.equals(channelName);
+        boolean accepted = graphicsChannel || mouseCursorChannel;
 
         int idBytes = variableUIntBytes(cbChId);
         Packet response = new Packet(1 + idBytes + 4);
@@ -163,12 +179,15 @@ final class DrdynvcChannel extends VChannel {
 
         logger.info("drdynvc: create name=" + channelName + ", id=" + channelId
                 + ", accepted=" + accepted);
-        if (accepted) {
+        if (graphicsChannel) {
             gfxChannelId = channelId;
             bulkDecompressor = new Rdp8BulkDecompressor();
             clearCodecDecoder = new ClearCodecDecoder();
             bitmapCache.clear();
             sendGfxCapabilities();
+        } else if (mouseCursorChannel) {
+            mouseCursorChannelId = channelId;
+            sendMouseCursorCapabilities();
         }
     }
 
@@ -178,21 +197,21 @@ final class DrdynvcChannel extends VChannel {
         if (totalLength <= 0 || totalLength > MAX_DYNAMIC_MESSAGE_LENGTH) {
             throw new RdesktopException("drdynvc分片总长度无效: " + totalLength);
         }
-        fragmentedChannelId = channelId;
-        fragmentedLength = totalLength;
-        fragmentedData = new ByteArrayOutputStream(Math.min(totalLength, 64 * 1024));
-        appendRemaining(data, fragmentedData);
-        finishFragmentIfComplete();
+        if (dynamicFragments.containsKey(channelId)) {
+            throw new RdesktopException("drdynvc channel already has an incomplete message: " + channelId);
+        }
+        DynamicFragment fragment = new DynamicFragment(totalLength);
+        dynamicFragments.put(channelId, fragment);
+        appendRemaining(data, fragment.data);
+        finishFragmentIfComplete(channelId, fragment);
     }
 
     private void processData(Packet data, int cbChId) throws RdesktopException, IOException {
         int channelId = readVariableUInt(data, cbChId);
-        if (fragmentedData != null) {
-            if (channelId != fragmentedChannelId) {
-                throw new RdesktopException("interleaved drdynvc fragments are not supported");
-            }
-            appendRemaining(data, fragmentedData);
-            finishFragmentIfComplete();
+        DynamicFragment fragment = dynamicFragments.get(channelId);
+        if (fragment != null) {
+            appendRemaining(data, fragment.data);
+            finishFragmentIfComplete(channelId, fragment);
             return;
         }
         byte[] payload = readRemaining(data);
@@ -206,6 +225,7 @@ final class DrdynvcChannel extends VChannel {
         writeVariableUInt(response, cbChId, channelId);
         response.markEnd();
         send_packet(response);
+        dynamicFragments.remove(channelId);
         if (channelId == gfxChannelId) {
             gfxChannelId = -1;
             bulkDecompressor = new Rdp8BulkDecompressor();
@@ -213,6 +233,9 @@ final class DrdynvcChannel extends VChannel {
             surfaces.clear();
             bitmapCache.clear();
             dirtySurfaces.clear();
+        }
+        if (channelId == mouseCursorChannelId) {
+            mouseCursorChannelId = -1;
         }
     }
 
@@ -232,6 +255,20 @@ final class DrdynvcChannel extends VChannel {
         logger.info("rdpgfx: advertised version 10 (AVC disabled)");
     }
 
+    private void sendMouseCursorCapabilities() throws RdesktopException, IOException {
+        sendDynamicData(mouseCursorChannelId, createMouseCursorCapabilities());
+        logger.info("rdpemsc: advertised mouse cursor capability version 1");
+    }
+
+    static byte[] createMouseCursorCapabilities() {
+        byte[] payload = new byte[16];
+        payload[0] = MOUSE_CURSOR_PDU_CAPS_ADVERTISE;
+        putU32(payload, 4, MOUSE_CURSOR_CAPSET_SIGNATURE);
+        putU32(payload, 8, MOUSE_CURSOR_CAPSET_VERSION_1);
+        putU32(payload, 12, MOUSE_CURSOR_CAPSET_SIZE);
+        return payload;
+    }
+
     private void sendDynamicData(int channelId, byte[] payload) throws RdesktopException, IOException {
         int cbChId = variableUIntCode(channelId);
         Packet packet = new Packet(1 + variableUIntBytes(cbChId) + payload.length);
@@ -244,6 +281,10 @@ final class DrdynvcChannel extends VChannel {
     }
 
     private void dispatchDynamicData(int channelId, byte[] payload) throws RdesktopException, IOException {
+        if (channelId == mouseCursorChannelId) {
+            processMouseCursorData(payload);
+            return;
+        }
         if (channelId != gfxChannelId) {
             logger.fine("drdynvc: data id=" + channelId + ", bytes=" + payload.length);
             return;
@@ -266,6 +307,121 @@ final class DrdynvcChannel extends VChannel {
             int length = (int) unsignedLength;
             processGfxPdu(command, decoded, offset, length);
             offset += length;
+        }
+    }
+
+    void processMouseCursorData(byte[] payload) throws RdesktopException {
+        require(payload, 0, 4, "MS-RDPEMSC header");
+        int pduType = payload[0] & 0xFF;
+        int updateType = payload[1] & 0xFF;
+        switch (pduType) {
+            case MOUSE_CURSOR_PDU_CAPS_CONFIRM:
+                processMouseCursorCapabilitiesConfirm(payload);
+                break;
+            case MOUSE_CURSOR_PDU_POINTER_UPDATE:
+                processMouseCursorUpdate(updateType, payload);
+                break;
+            default:
+                logger.warning("rdpemsc: unsupported PDU type=" + pduType);
+                break;
+        }
+    }
+
+    private void processMouseCursorCapabilitiesConfirm(byte[] payload) throws RdesktopException {
+        require(payload, 4, 12, "MS-RDPEMSC capability confirmation");
+        long signature = u32(payload, 4);
+        long version = u32(payload, 8);
+        long size = u32(payload, 12);
+        if (signature != MOUSE_CURSOR_CAPSET_SIGNATURE
+                || version != MOUSE_CURSOR_CAPSET_VERSION_1
+                || size < MOUSE_CURSOR_CAPSET_SIZE) {
+            throw new RdesktopException(String.format(
+                    "MS-RDPEMSC capability confirmation is invalid: signature=0x%08x, version=%d, size=%d",
+                    signature, version, size));
+        }
+        logger.info("rdpemsc: server confirmed mouse cursor capability version 1");
+    }
+
+    private void processMouseCursorUpdate(int updateType, byte[] payload) throws RdesktopException {
+        requireCursorState();
+        switch (updateType) {
+            case MOUSE_CURSOR_UPDATE_HIDDEN:
+                displayCursor(state.getCanvas().getHiddenCursor());
+                break;
+            case MOUSE_CURSOR_UPDATE_DEFAULT:
+                displayCursor(null);
+                break;
+            case MOUSE_CURSOR_UPDATE_POSITION:
+                require(payload, 4, 4, "MS-RDPEMSC pointer position");
+                // The local pointer already follows local input. Warping it for each
+                // echoed server position causes visible jumps and click displacement.
+                break;
+            case MOUSE_CURSOR_UPDATE_CACHED:
+                require(payload, 4, 2, "MS-RDPEMSC cached pointer");
+                displayCursor(state.getCache().getCursor(u16(payload, 4)));
+                break;
+            case MOUSE_CURSOR_UPDATE_POINTER:
+                processMouseCursorPointer(payload, false);
+                break;
+            case MOUSE_CURSOR_UPDATE_LARGE_POINTER:
+                processMouseCursorPointer(payload, true);
+                break;
+            default:
+                logger.warning("rdpemsc: unsupported pointer update type=0x"
+                        + Integer.toHexString(updateType));
+                break;
+        }
+    }
+
+    private void processMouseCursorPointer(byte[] payload, boolean large) throws RdesktopException {
+        int fixedLength = large ? 20 : 16;
+        require(payload, 4, fixedLength, large
+                ? "MS-RDPEMSC large pointer attributes" : "MS-RDPEMSC pointer attributes");
+        int offset = 4;
+        int xorBpp = u16(payload, offset);
+        int cacheIndex = u16(payload, offset + 2);
+        int hotX = u16(payload, offset + 4);
+        int hotY = u16(payload, offset + 6);
+        int width = u16(payload, offset + 8);
+        int height = u16(payload, offset + 10);
+        long andLength = large ? u32(payload, offset + 12) : u16(payload, offset + 12);
+        long xorLength = large ? u32(payload, offset + 16) : u16(payload, offset + 14);
+        int bitmapOffset = offset + fixedLength;
+        long totalLength = andLength + xorLength;
+        if (andLength > Integer.MAX_VALUE || xorLength > Integer.MAX_VALUE
+                || totalLength > payload.length - bitmapOffset) {
+            throw new RdesktopException("MS-RDPEMSC pointer bitmap data is incomplete");
+        }
+
+        // The protocol stores XOR data first even though its length field follows
+        // the AND length. RdesktopCanvas performs the bottom-up row conversion.
+        byte[] xorMask = Arrays.copyOfRange(payload, bitmapOffset,
+                bitmapOffset + (int) xorLength);
+        byte[] andMask = Arrays.copyOfRange(payload, bitmapOffset + (int) xorLength,
+                bitmapOffset + (int) totalLength);
+        RdpCursor cursor = state.getCanvas().createCursor(hotX, hotY, width, height,
+                andMask, xorMask, cacheIndex, xorBpp);
+        if (cursor == null) {
+            throw new RdesktopException("MS-RDPEMSC pointer could not be decoded: "
+                    + width + "x" + height + "@" + xorBpp);
+        }
+        state.getCache().putCursor(cacheIndex, cursor);
+        displayCursor(cursor);
+        logger.fine("rdpemsc: decoded " + (large ? "large " : "") + "pointer "
+                + width + "x" + height + "@" + xorBpp + ", cache=" + cacheIndex);
+    }
+
+    private void requireCursorState() throws RdesktopException {
+        if (state == null || state.getCanvas() == null) {
+            throw new RdesktopException("MS-RDPEMSC pointer update arrived before canvas initialization");
+        }
+    }
+
+    private void displayCursor(RdpCursor cursor) {
+        try {
+            state.getCanvas().getDisplay().setCursor(cursor);
+        } catch (HeadlessException e) {
+            logger.fine("rdpemsc: cursor display is unavailable in headless mode");
         }
     }
 
@@ -644,19 +800,33 @@ final class DrdynvcChannel extends VChannel {
                 | ((data[offset + 3] & 0xFFL) << 24);
     }
 
-    private void finishFragmentIfComplete() throws RdesktopException, IOException {
-        if (fragmentedData == null || fragmentedData.size() < fragmentedLength) {
+    private static void putU32(byte[] data, int offset, long value) {
+        data[offset] = (byte) value;
+        data[offset + 1] = (byte) (value >>> 8);
+        data[offset + 2] = (byte) (value >>> 16);
+        data[offset + 3] = (byte) (value >>> 24);
+    }
+
+    private void finishFragmentIfComplete(int channelId, DynamicFragment fragment)
+            throws RdesktopException, IOException {
+        if (fragment.data.size() < fragment.length) {
             return;
         }
-        if (fragmentedData.size() != fragmentedLength) {
+        dynamicFragments.remove(channelId);
+        if (fragment.data.size() != fragment.length) {
             throw new RdesktopException("drdynvc fragmented message exceeds declared length");
         }
-        byte[] payload = fragmentedData.toByteArray();
-        int channelId = fragmentedChannelId;
-        fragmentedData = null;
-        fragmentedChannelId = -1;
-        fragmentedLength = 0;
-        dispatchDynamicData(channelId, payload);
+        dispatchDynamicData(channelId, fragment.data.toByteArray());
+    }
+
+    private static final class DynamicFragment {
+        final int length;
+        final ByteArrayOutputStream data;
+
+        DynamicFragment(int length) {
+            this.length = length;
+            this.data = new ByteArrayOutputStream(Math.min(length, 64 * 1024));
+        }
     }
 
     private static final class GfxSurface {

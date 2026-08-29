@@ -6,7 +6,7 @@
 
     <groupId>com.tangluobo</groupId>
     <artifactId>rdp4j</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <name>rdp4j</name>
     <description>Java RDP client library with Swing and JavaFX integration.</description>
     <url>https://github.com/tangluobo123/tomato</url>
@@ -75,6 +75,12 @@
             <groupId>org.bouncycastle</groupId>
             <artifactId>bctls-jdk18on</artifactId>
             <version>1.83</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

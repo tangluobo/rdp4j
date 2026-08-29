@@ -1,5 +1,6 @@
 package com.tangluobo.tomato.rdp;
 
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -33,6 +34,8 @@ public class RdpPatch extends Rdp {
     private volatile int lastServerStatusSeen = 0;
     private volatile Consumer<Void> onFirstFrame;
     private volatile boolean firstFrameReceived = false;
+    private int fastPathFragmentType = -1;
+    private ByteArrayOutputStream fastPathFragmentData;
     private final java.util.List<String> pduHistory = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     // 反射访问Rdp的private方法/字段
@@ -82,7 +85,7 @@ public class RdpPatch extends Rdp {
             encryption = false;
         }
 
-        int length, count;
+        int length;
         int type;
         int next;
 
@@ -122,43 +125,87 @@ public class RdpPatch extends Rdp {
             length = s.getLittleEndian16();
             next = s.getPosition() + length;
             type = updateCode; // 用 updateCode 作为 switch 类型
+            if (next < s.getPosition() || next > s.getEnd()) {
+                throw new RdesktopException("FASTPATH update length exceeds packet: " + length);
+            }
 
             if (logger.isLoggable(Level.FINEST)) {
                 logger.finest(String.format("[RDP5 #%d] updateHeader=0x%02x, updateCode=%d, frag=%d, comp=%d(compFlags=0x%02x), length=%d",
                         pktNum, updateHeader, updateCode, fragmentation, compression, compressionFlags, length));
             }
 
-            // 诊断：分片 bitmap update 警告（单片处理可能解析失败）
-            if (type == 1 && fragmentation != 0) {
-                logger.warning(String.format("[RDP5 #%d] bitmap update 分片未合并: frag=%d (0=SINGLE,1=LAST,2=FIRST,3=NEXT)", pktNum, fragmentation));
+            if (fragmentation != 0) {
+                processFastPathFragment(type, fragmentation, s, next);
+                s.setPosition(next);
+                continue;
             }
 
+            processFastPathUpdate(type, s, next, updateHeader);
+            s.setPosition(next);
+        }
+    }
+
+    private void processFastPathFragment(int type, int fragmentation, Packet source, int next)
+            throws RdesktopException, OrderException {
+        if (fragmentation == 2) { // FIRST
+            fastPathFragmentType = type;
+            fastPathFragmentData = new ByteArrayOutputStream(Math.min(next - source.getPosition(), 64 * 1024));
+        } else if (fastPathFragmentData == null || fastPathFragmentType != type) {
+            throw new RdesktopException("FASTPATH fragment sequence is invalid: type=" + type
+                    + ", fragment=" + fragmentation);
+        }
+
+        int fragmentLength = next - source.getPosition();
+        if ((long) fastPathFragmentData.size() + fragmentLength > 128L * 1024 * 1024) {
+            fastPathFragmentData = null;
+            fastPathFragmentType = -1;
+            throw new RdesktopException("FASTPATH fragmented update exceeds safety limit");
+        }
+        byte[] fragment = new byte[fragmentLength];
+        source.copyToByteArray(fragment, 0, source.getPosition(), fragmentLength);
+        fastPathFragmentData.write(fragment, 0, fragment.length);
+
+        if (fragmentation != 1) { // NEXT or FIRST; wait for LAST
+            return;
+        }
+        byte[] combined = fastPathFragmentData.toByteArray();
+        int combinedType = fastPathFragmentType;
+        fastPathFragmentData = null;
+        fastPathFragmentType = -1;
+        Packet packet = new Packet(combined);
+        packet.setPosition(0);
+        processFastPathUpdate(combinedType, packet, packet.getEnd(), combinedType);
+    }
+
+    private void processFastPathUpdate(int type, Packet data, int next, int updateHeader)
+            throws RdesktopException, OrderException {
             switch (type) {
             case 0: // orders
-                count = s.getLittleEndian16();
-                orders.processOrders(s, next, count);
+                int count = data.getLittleEndian16();
+                orders.processOrders(data, next, count);
                 break;
             case 1: // bitmap update
-                s.incrementPosition(2);
-                processBitmapUpdates(s);
+                data.incrementPosition(2);
+                processBitmapUpdates(data);
                 break;
             case 2: // palette
-                s.incrementPosition(2);
-                processPalette(s);
+                data.incrementPosition(2);
+                processPalette(data);
                 break;
             case 3: break;
-            case 5: process_null_system_pointer_pdu(s); break;
-            case 6: break;
+            case 5: process_null_system_pointer_pdu(data); break;
+            case 6: // default pointer
+                process_default_system_pointer_pdu();
+                break;
             case 8: break; // pointer position; local Swing cursor position is authoritative
-            case 9: process_colour_pointer_pdu(s); break;
-            case 10: process_cached_pointer_pdu(s); break;
-            case 11: process_colour_pointer_pdu_new(s); break;
+            case 9: process_colour_pointer_pdu(data); break;
+            case 10: process_cached_pointer_pdu(data); break;
+            case 11: process_colour_pointer_pdu_new(data); break;
+            case 12: process_colour_pointer_pdu_large(data); break;
             default:
                 logger.warning("Unimplemented RDP5 updateCode " + type
                         + " (updateHeader=0x" + String.format("%02x", updateHeader) + ")");
             }
-            s.setPosition(next);
-        }
     }
 
     @Override

@@ -62,6 +62,10 @@ public class RdesktopCanvas {
 	private int bottom = 0;
 	private IContext context;
 	private int height;
+	private RdpCursor hiddenCursor;
+	private int lastLoggedCursorWidth = -1;
+	private int lastLoggedCursorHeight = -1;
+	private int lastLoggedCursorBpp = -1;
 	// unsetBusyCursor
 	private Input input = null;
 	private int left = 0;
@@ -123,7 +127,15 @@ public class RdesktopCanvas {
 	}
 
 	public RdpCursor createCursor(int nXDst, int nYDst, int nWidth, int nHeight, byte[] andMask, byte[] xorMask, int cache_idx,
-			int xorBpp, boolean vFlip) {
+			int xorBpp) {
+		if (nWidth != lastLoggedCursorWidth || nHeight != lastLoggedCursorHeight
+				|| xorBpp != lastLoggedCursorBpp) {
+			logger.info("Remote cursor source: {}x{} @ {}bpp, hotspot={},{}",
+					nWidth, nHeight, xorBpp, nXDst, nYDst);
+			lastLoggedCursorWidth = nWidth;
+			lastLoggedCursorHeight = nHeight;
+			lastLoggedCursorBpp = xorBpp;
+		}
 		int x, y;
 		int xorStep;
 		int andStep;
@@ -153,13 +165,10 @@ public class RdesktopCanvas {
 				byte[] andBits = new byte[andStep];
 				byte[] xorBits = new byte[xorStep];
 				xorBit = andBit = 0x80;
-				if (!vFlip) {
-					System.arraycopy(xorMask, xorStep * y, xorBits, 0, xorBits.length);
-					System.arraycopy(andMask, andStep * y, andBits, 0, andBits.length);
-				} else {
-					System.arraycopy(xorMask, xorStep * (nHeight - y - 1), xorBits, 0, xorBits.length);
-					System.arraycopy(andMask, andStep * (nHeight - y - 1), andBits, 0, andBits.length);
-				}
+				// The 1-bpp New Pointer encoding is already top-down (unlike
+				// multi-byte color pointer scan lines).
+				System.arraycopy(xorMask, xorStep * y, xorBits, 0, xorBits.length);
+				System.arraycopy(andMask, andStep * y, andBits, 0, andBits.length);
 				int xorBitIdx = 0;
 				int andBitIdx = 0;
 				for (x = 0; x < nWidth; x++) {
@@ -192,6 +201,8 @@ public class RdesktopCanvas {
 		case 32:
 			int xorBytesPerPixel = xorBpp >> 3;
 			xorStep = nWidth * xorBytesPerPixel;
+			// Each encoded XOR scan line is padded to a 2-byte boundary.
+			xorStep += xorStep % 2;
 			if (xorStep * nHeight > xorMask.length)
 				return null;
 			if (andMask != null) {
@@ -209,25 +220,20 @@ public class RdesktopCanvas {
 				byte[] xorBits = new byte[xorStep];
 				byte[] andBits = new byte[andStep];
 				andBit = 0x80;
-				if (!vFlip) {
-					if (andMask != null)
-						System.arraycopy(andMask, andStep * y, andBits, 0, andBits.length);
-					System.arraycopy(xorMask, xorStep * y, xorBits, 0, xorBits.length);
-				} else {
-					if (andMask != null)
-						System.arraycopy(andMask, andStep * (nHeight - y - 1), andBits, 0, andBits.length);
-					System.arraycopy(xorMask, xorStep * (nHeight - y - 1), xorBits, 0, xorBits.length);
-				}
+				if (andMask != null)
+					System.arraycopy(andMask, andStep * (nHeight - y - 1), andBits, 0, andBits.length);
+				System.arraycopy(xorMask, xorStep * (nHeight - y - 1), xorBits, 0, xorBits.length);
 				for (x = 0; x < nWidth; x++) {
 					if (xorBpp == 8) {
 						xorPixel = colormap.getRGB(xorBits[xorBitsIdx]);
 					} else if (xorBpp == 24 || xorBpp == 32) {
-						int b1 = (xorBits[xorBitsIdx] << 16) & 0x00ffffff;
-						int b2 = (xorBits[xorBitsIdx + 1] << 8) & 0x00ffffff;
-						int b3 = xorBits[xorBitsIdx + 2] & 0x000000ff;
-						int val = b1 | b2 | b3 | 0xff000000;
-						bim.setRGB(x, y, val);
-						xorPixel = bim.getRGB(x, y);
+						// RDP color pointer pixels use BGR byte order. Mask every
+						// byte before shifting because Java bytes are signed.
+						int blue = xorBits[xorBitsIdx] & 0xff;
+						int green = xorBits[xorBitsIdx + 1] & 0xff;
+						int red = xorBits[xorBitsIdx + 2] & 0xff;
+						int alpha = xorBpp == 32 ? xorBits[xorBitsIdx + 3] & 0xff : 0xff;
+						xorPixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
 					} else {
 						throw new UnsupportedOperationException("TODO 16 bit cursor colour depth is not supported.");
 					}
@@ -255,6 +261,15 @@ public class RdesktopCanvas {
 			return null;
 		}
 		return createCustomCursor(bim, new Point(nXDst, nYDst), "", cache_idx);
+	}
+
+	/** Return a transparent cursor for the RDP system-pointer hidden state. */
+	public RdpCursor getHiddenCursor() {
+		if (hiddenCursor == null) {
+			BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
+			hiddenCursor = backstore.createCursor("hidden", new Point(0, 0), image);
+		}
+		return hiddenCursor;
 	}
 
 	/**

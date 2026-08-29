@@ -23,6 +23,7 @@ import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.awt.image.BufferedImage;
 import java.awt.image.IndexColorModel;
+import java.util.function.Consumer;
 
 import javax.swing.JComponent;
 import javax.swing.Scrollable;
@@ -37,6 +38,7 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	private BufferedImage bi = null;
 	private RdesktopCanvas canvas;
 	private IndexColorModel cm = null;
+	private volatile Consumer<RdpCursor> cursorListener;
 
 	public WrappedImage(int width, int height, int imgType) {
 		bi = new BufferedImage(width, height, imgType);
@@ -166,6 +168,19 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	@Override
 	public void setCursor(RdpCursor cursor) {
 		setCursor(cursor == null ? null : ((AWTRdpCursor) cursor).getCursor());
+		Consumer<RdpCursor> listener = cursorListener;
+		if (listener != null) {
+			listener.accept(cursor);
+		}
+	}
+
+	/**
+	 * Receives the original RDP cursor before SwingNode translates the AWT
+	 * custom cursor to JavaFX. SwingNode only preserves predefined AWT cursor
+	 * types and otherwise falls back to the default arrow.
+	 */
+	public void setRdpCursorListener(Consumer<RdpCursor> cursorListener) {
+		this.cursorListener = cursorListener;
 	}
 
 	/**
