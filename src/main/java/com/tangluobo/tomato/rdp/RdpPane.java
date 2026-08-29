@@ -623,13 +623,15 @@ public class RdpPane extends BorderPane {
         exitBar.setAlignment(Pos.CENTER);
         exitBar.setPrefWidth(520);
         exitBar.setMinWidth(175);
-        exitBar.setMaxWidth(760);
+        // StackPane会把可调整大小的子节点扩展到maxWidth，因此用相同的
+        // pref/max值锁定当前宽度；拖动边缘时同时更新二者。
+        exitBar.setMaxWidth(520);
         exitBar.setMinHeight(Region.USE_PREF_SIZE);
         exitBar.setMaxHeight(Region.USE_PREF_SIZE);
         exitBar.setStyle("-fx-background-color: linear-gradient(to bottom, #3d8bd2, #07519a);"
                 + " -fx-background-radius: 0 0 8 8; -fx-border-color: #75b8f0;"
                 + " -fx-border-width: 0 1 1 1; -fx-border-radius: 0 0 8 8;"
-                + " -fx-padding: 4 10 4 10;"
+                + " -fx-padding: 4 0 4 0;"
                 + " -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 7, 0.3, 0, 2);");
 
         ToggleButton pinBtn = new ToggleButton();
@@ -962,9 +964,9 @@ public class RdpPane extends BorderPane {
 
     private Region createControlBarResizeGrip() {
         Region grip = new Region();
-        grip.setMinWidth(5);
-        grip.setPrefWidth(5);
-        grip.setMaxWidth(5);
+        grip.setMinWidth(7);
+        grip.setPrefWidth(7);
+        grip.setMaxWidth(7);
         grip.setMaxHeight(Double.MAX_VALUE);
         grip.setCursor(Cursor.H_RESIZE);
         return grip;
@@ -1004,6 +1006,7 @@ public class RdpPane extends BorderPane {
             double usedDelta = leftEdge ? start[1] - width : width - start[1];
             double requestedX = start[2] + (leftEdge ? usedDelta / 2 : usedDelta / 2);
             exitBar.setPrefWidth(width);
+            exitBar.setMaxWidth(width);
             exitBar.setTranslateX(clampControlBarX(requestedX, width));
             e.consume();
         });
