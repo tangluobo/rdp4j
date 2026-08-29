@@ -74,6 +74,8 @@ public class RdpPane extends BorderPane {
     private volatile JScrollPane desktopScrollPane;
     private volatile JComponent desktopDisplay;
     private volatile boolean windowScrollBarsSuppressed;
+    private int verticalPolicyBeforeFullScreen = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED;
+    private int horizontalPolicyBeforeFullScreen = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED;
 
     // 状态栏组件
     private HBox statusBar;
@@ -629,6 +631,11 @@ public class RdpPane extends BorderPane {
         }
         rdpClient.releaseRemoteModifierKeys();
         fullScreenTransitioning = true;
+        JScrollPane currentScrollPane = desktopScrollPane;
+        if (currentScrollPane != null) {
+            verticalPolicyBeforeFullScreen = currentScrollPane.getVerticalScrollBarPolicy();
+            horizontalPolicyBeforeFullScreen = currentScrollPane.getHorizontalScrollBarPolicy();
+        }
         // tab内容用占位面板顶替，保持tab结构不变
         ownerTab.setContent(new StackPane());
         // 全屏时隐藏状态栏，只显示远程桌面
@@ -821,12 +828,13 @@ public class RdpPane extends BorderPane {
         if (swingNode != null) {
             swingNode.getTransforms().clear();
         }
-        // 恢复滚动条策略
+        // 原样恢复进入全屏前的滚动条策略。首次打开时可能是NEVER，不能无条件
+        // 改成AS_NEEDED，否则全屏往返后会凭空出现滚动条。
         final JScrollPane scrollPane = desktopScrollPane;
         if (scrollPane != null) {
             SwingUtilities.invokeLater(() -> {
-                scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
-                scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+                scrollPane.setVerticalScrollBarPolicy(verticalPolicyBeforeFullScreen);
+                scrollPane.setHorizontalScrollBarPolicy(horizontalPolicyBeforeFullScreen);
             });
         }
         // 恢复状态栏和tab内容
