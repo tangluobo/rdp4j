@@ -455,11 +455,10 @@ public class RdpPatch extends Rdp {
             }
 
             // DEMAND_ACTIVE处理完毕后，processDemandActive内部已经发送了：
-            // sendConfirmActive（含capabilities + ready(INPUT) → doLockKeys同步键状态）
+            // sendConfirmActive（含capabilities + ready(INPUT) → TS_SYNC_EVENT同步键状态）
             // sendSynchronize、sendControl、sendFonts，并接收了4个响应PDU。
-            // doLockKeys已发送CapsLock/NumLock/ScrollLock同步事件，服务器应开始推送画面。
-            // 注意：不再额外发送sendInput(0,0,0,0,0)——RDP_INPUT_SYNCHRONIZE在库中定义为0，
-            // 但MS-RDPBCGR规范中INPUT_EVENT_SYNC=3，值0会被服务器当作未知事件忽略。
+            // Input.triggerReadyToSend已发送一次slow-path INPUT_EVENT_SYNC（消息类型0），
+            // 其中toggleFlags携带CapsLock/NumLock/ScrollLock的绝对状态；无需重复发送。
         }
         } finally {
             // A redirected/closed protocol instance must become read-only before

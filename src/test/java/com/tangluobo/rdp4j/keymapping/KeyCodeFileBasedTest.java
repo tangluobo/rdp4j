@@ -99,6 +99,26 @@ class KeyCodeFileBasedTest {
                 0x35 | KeyCode_FileBased.SCANCODE_EXTENDED, KeyCode_FileBased.DOWN);
     }
 
+    @Test
+    void numericKeypadArrowsKeepNonExtendedPhysicalScanCodes() throws Exception {
+        KeyCode_FileBased keymap = loadUsKeymap();
+        Canvas component = new Canvas();
+        int[] keyCodes = {
+                KeyEvent.VK_KP_UP, KeyEvent.VK_KP_DOWN,
+                KeyEvent.VK_KP_LEFT, KeyEvent.VK_KP_RIGHT
+        };
+        int[] scanCodes = { 0x48, 0x50, 0x4b, 0x4d };
+
+        for (int i = 0; i < keyCodes.length; i++) {
+            String press = keymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_PRESSED,
+                    keyCodes[i], KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_NUMPAD));
+            String release = keymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_RELEASED,
+                    keyCodes[i], KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_NUMPAD));
+            assertStroke(press, scanCodes[i], KeyCode_FileBased.DOWN);
+            assertStroke(release, scanCodes[i], KeyCode_FileBased.UP);
+        }
+    }
+
     private static KeyCode_FileBased loadUsKeymap() throws Exception {
         Options options = new Options();
         URL url = KeyCodeFileBasedTest.class.getResource("/keymaps/en-us");

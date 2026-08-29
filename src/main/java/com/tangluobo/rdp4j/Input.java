@@ -55,6 +55,9 @@ public class Input {
 	protected static final int RDP_INPUT_MOUSE = 0x8001;
 	protected static final int RDP_INPUT_SCANCODE = 4;
 	protected static final int RDP_INPUT_SYNCHRONIZE = 0;
+	protected static final int TS_SYNC_SCROLL_LOCK = 0x00000001;
+	protected static final int TS_SYNC_NUM_LOCK = 0x00000002;
+	protected static final int TS_SYNC_CAPS_LOCK = 0x00000004;
 	protected static final int RDP_INPUT_VIRTKEY = 2;
 	protected static final int RDP_KEYPRESS = 0;
 	protected static final int RDP_KEYRELEASE = KBD_FLAG_DOWN | KBD_FLAG_UP;
@@ -598,12 +601,8 @@ public class Input {
 	public void triggerReadyToSend() {
 		logger.info("Input ready to send");
 		remoteShiftStateKnown = false;
-		// rdp.sendInput(0, RDP_INPUT_SYNCHRONIZE, 0, 0, 0);
-		capsLockOn = false;
-		numLockOn = false;
-		scrollLockOn = false;
 		try {
-			doLockKeys(); // ensure lock key states are correct
+			doLockKeys(); // synchronize local toggle-key state without toggling a reused session
 		} catch (UnsupportedOperationException e) {
 			// Headless/remote Java runtimes may not expose the host lock-key
 			// state. This synchronization is optional and must not abort the RDP
@@ -613,29 +612,26 @@ public class Input {
 	}
 
 	protected void doLockKeys() {
-		if (logger.isDebugEnabled())
-			logger.debug("doLockKeys");
-		if (canvas.getDisplay().getLockingKeyState(KeyEvent.VK_CAPS_LOCK) != capsLockOn) {
-			capsLockOn = !capsLockOn;
-			if (logger.isDebugEnabled())
-				logger.debug("CAPS LOCK toggle");
-			sendScancode(getTime(), RDP_KEYPRESS, 0x3a);
-			sendScancode(getTime(), RDP_KEYRELEASE, 0x3a);
+		capsLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_CAPS_LOCK);
+		numLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_NUM_LOCK);
+		scrollLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_SCROLL_LOCK);
+		int toggleFlags = toggleFlags(capsLockOn, numLockOn, scrollLockOn);
+		if (logger.isDebugEnabled()) {
+			logger.debug("Synchronizing keyboard toggle flags: 0x" + Integer.toHexString(toggleFlags));
 		}
-		if (canvas.getDisplay().getLockingKeyState(KeyEvent.VK_NUM_LOCK) != numLockOn) {
-			numLockOn = !numLockOn;
-			if (logger.isDebugEnabled())
-				logger.debug("NUM LOCK toggle");
-			sendScancode(getTime(), RDP_KEYPRESS, 0x45);
-			sendScancode(getTime(), RDP_KEYRELEASE, 0x45);
-		}
-		if (canvas.getDisplay().getLockingKeyState(KeyEvent.VK_SCROLL_LOCK) != scrollLockOn) {
-			scrollLockOn = !scrollLockOn;
-			if (logger.isDebugEnabled())
-				logger.debug("SCROLL LOCK toggle");
-			sendScancode(getTime(), RDP_KEYPRESS, 0x46);
-			sendScancode(getTime(), RDP_KEYRELEASE, 0x46);
-		}
+		// TS_SYNC_EVENT sets the server state absolutely and also releases any
+		// keys it still considers down. Simulating lock-key presses is incorrect
+		// for redirected/reconnected sessions because their initial state is not
+		// necessarily off, and can therefore invert Num Lock.
+		state.getRdp().sendInput(getTime(), RDP_INPUT_SYNCHRONIZE, 0, toggleFlags, 0);
+	}
+
+	static int toggleFlags(boolean capsLock, boolean numLock, boolean scrollLock) {
+		int flags = 0;
+		if (scrollLock) flags |= TS_SYNC_SCROLL_LOCK;
+		if (numLock) flags |= TS_SYNC_NUM_LOCK;
+		if (capsLock) flags |= TS_SYNC_CAPS_LOCK;
+		return flags;
 	}
 
 	/**

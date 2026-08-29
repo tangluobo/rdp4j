@@ -21,7 +21,7 @@ The artifact coordinates are:
 <dependency>
     <groupId>com.tangluobo</groupId>
     <artifactId>rdp4j</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.2</version>
 </dependency>
 ```
 

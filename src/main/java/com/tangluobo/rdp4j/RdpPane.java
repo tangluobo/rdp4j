@@ -99,6 +99,7 @@ public class RdpPane extends BorderPane {
     private PauseTransition hideExitBarTimer;
     private TranslateTransition exitBarSlide;
     private boolean exitBarPinned;
+    private java.awt.event.AWTEventListener fullScreenEdgeMouseListener;
     private java.awt.KeyEventDispatcher fullScreenKeyDispatcher; // 常驻拦截Ctrl+Shift+Enter切换全屏（Swing焦点场景，校验焦点在RDP画布）
     private boolean fullScreenTransitioning; // 防止fullScreen/close监听器重入，造成视图留在已关闭的Scene中
     private long sceneRefreshGeneration;     // 丢弃快速连续切换产生的过期刷新任务
@@ -617,6 +618,8 @@ public class RdpPane extends BorderPane {
         if (fullScreenStage != null) {
             exitFullScreen();
         }
+        // 进入全屏过程中若窗口初始化异常，也确保旁听器不会残留在AWT Toolkit上。
+        stopFullScreenEdgeMonitor();
         // 注销常驻的全屏切换键分发器（组件销毁，避免泄漏）
         if (fullScreenKeyDispatcher != null) {
             try {
@@ -862,19 +865,16 @@ public class RdpPane extends BorderPane {
         hideExitBarTimer = new PauseTransition(Duration.seconds(5));
         hideExitBarTimer.setOnFinished(e -> hideExitBar());
 
-        // 顶部透明感应条：SwingNode会拦截鼠标事件导致Scene过滤器收不到，
-        // 用一个覆盖顶部5px的FX节点通过MOUSE_ENTERED可靠触发退出按钮
-        Region topEdgeTrigger = new Region();
-        topEdgeTrigger.setPrefHeight(5);
-        topEdgeTrigger.setMaxHeight(5);
-        topEdgeTrigger.setStyle("-fx-background-color: transparent;");
-        topEdgeTrigger.setOnMouseEntered(e -> showExitBar());
-        topEdgeTrigger.setOnMouseMoved(e -> showExitBar());
-        StackPane.setAlignment(topEdgeTrigger, Pos.TOP_CENTER);
-
         fullScreenRoot = new StackPane(this);
         fullScreenRoot.setStyle("-fx-background-color: black;");
-        fullScreenRoot.getChildren().addAll(topEdgeTrigger, exitBar);
+        fullScreenRoot.getChildren().add(exitBar);
+
+        // 被SwingNode转成AWT事件的鼠标移动不会稳定到达JavaFX Scene，但不能再用
+        // 覆盖式FX感应条兜底：它会截断顶端5px的RDP输入，导致A->B->C套娃时
+        // B收不到鼠标到达顶边的事件，C的全屏控制栏也就无法出现。
+        // AWT全局观察器只旁听当前RDP滚动区域内的事件，不消费事件，当前层控制栏
+        // 能正常出现，同一个移动事件也会继续由RDP输入管线发送给下一层。
+        startFullScreenEdgeMonitor();
 
         Scene scene = new Scene(fullScreenRoot, Color.BLACK);
         // 兜底：鼠标靠近顶部边沿（5px内）时显示退出按钮
@@ -951,6 +951,7 @@ public class RdpPane extends BorderPane {
         StackPane oldRoot = fullScreenRoot;
         fullScreenStage = null;
         fullScreenRoot = null;
+        stopFullScreenEdgeMonitor();
         exitBar = null;
         hideExitBarTimer = null;
         exitBarSlide = null;
@@ -1061,6 +1062,61 @@ public class RdpPane extends BorderPane {
         exitBarSlide = new TranslateTransition(Duration.millis(200), exitBar);
         exitBarSlide.setToY(0);
         exitBarSlide.play();
+    }
+
+    private void startFullScreenEdgeMonitor() {
+        if (fullScreenEdgeMouseListener != null) {
+            return;
+        }
+        fullScreenEdgeMouseListener = event -> {
+            if (!(event instanceof java.awt.event.MouseEvent mouseEvent)) {
+                return;
+            }
+            int eventId = mouseEvent.getID();
+            if (eventId != java.awt.event.MouseEvent.MOUSE_MOVED
+                    && eventId != java.awt.event.MouseEvent.MOUSE_DRAGGED
+                    && eventId != java.awt.event.MouseEvent.MOUSE_ENTERED) {
+                return;
+            }
+            JScrollPane scrollPane = desktopScrollPane;
+            if (scrollPane == null || !(mouseEvent.getSource() instanceof java.awt.Component source)
+                    || (source != scrollPane && !SwingUtilities.isDescendingFrom(source, scrollPane))) {
+                return;
+            }
+            java.awt.Point point = SwingUtilities.convertPoint(source, mouseEvent.getPoint(), scrollPane);
+            if (isAtFullScreenTopEdge(point.x, point.y, scrollPane.getWidth())) {
+                Platform.runLater(() -> {
+                    if (fullScreenStage != null) {
+                        showExitBar();
+                    }
+                });
+            }
+        };
+        try {
+            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(
+                    fullScreenEdgeMouseListener,
+                    java.awt.AWTEvent.MOUSE_EVENT_MASK | java.awt.AWTEvent.MOUSE_MOTION_EVENT_MASK);
+        } catch (RuntimeException e) {
+            logger.log(Level.WARNING, "无法启用全屏顶部鼠标监听", e);
+            fullScreenEdgeMouseListener = null;
+        }
+    }
+
+    private void stopFullScreenEdgeMonitor() {
+        java.awt.event.AWTEventListener listener = fullScreenEdgeMouseListener;
+        fullScreenEdgeMouseListener = null;
+        if (listener == null) {
+            return;
+        }
+        try {
+            java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(listener);
+        } catch (RuntimeException e) {
+            logger.log(Level.FINE, "注销全屏顶部鼠标监听失败", e);
+        }
+    }
+
+    static boolean isAtFullScreenTopEdge(int x, int y, int width) {
+        return width > 0 && x >= 0 && x < width && y >= 0 && y <= 5;
     }
 
     private void hideExitBar() {

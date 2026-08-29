@@ -344,6 +344,13 @@ public class KeyCode_FileBased {
 		addKeyCodeMapping(mappings, KeyEvent.VK_SUBTRACT, 0x4a);
 		addKeyCodeMapping(mappings, KeyEvent.VK_MULTIPLY, 0x37);
 		addKeyCodeMapping(mappings, KeyEvent.VK_DIVIDE, 0x35 | SCANCODE_EXTENDED);
+		// With Num Lock off JavaFX reports the keypad arrow keys as VK_KP_*.
+		// They are still the non-extended physical keypad scan codes; the remote
+		// Num Lock state decides whether Windows treats them as digits or arrows.
+		addKeyCodeMapping(mappings, KeyEvent.VK_KP_UP, 0x48);
+		addKeyCodeMapping(mappings, KeyEvent.VK_KP_DOWN, 0x50);
+		addKeyCodeMapping(mappings, KeyEvent.VK_KP_LEFT, 0x4b);
+		addKeyCodeMapping(mappings, KeyEvent.VK_KP_RIGHT, 0x4d);
 	}
 
 	private void addKeyCodeMapping(Vector mappings, int keyCode, int scancode) {

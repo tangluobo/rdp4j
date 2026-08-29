@@ -29,6 +29,15 @@ class InputTest {
                 "local IME committed text must not be forwarded by the RDP canvas");
     }
 
+    @Test
+    void buildsAbsoluteRdpToggleFlags() {
+        assertEquals(0, Input.toggleFlags(false, false, false));
+        assertEquals(Input.TS_SYNC_NUM_LOCK,
+                Input.toggleFlags(false, true, false));
+        assertEquals(Input.TS_SYNC_CAPS_LOCK | Input.TS_SYNC_NUM_LOCK | Input.TS_SYNC_SCROLL_LOCK,
+                Input.toggleFlags(true, true, true));
+    }
+
     private static final class RecordingDisplay extends WrappedImage {
         private int inputMethodConfigurationCalls;
         private boolean inputMethodsEnabled = true;
