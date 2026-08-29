@@ -31,9 +31,11 @@ import javafx.scene.image.PixelBuffer;
 import javafx.scene.image.PixelFormat;
 import javafx.scene.image.WritableImage;
 import javafx.scene.control.Button;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.MouseEvent;
@@ -44,6 +46,7 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
+import javafx.scene.shape.SVGPath;
 import javafx.scene.transform.Scale;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
@@ -77,6 +80,7 @@ public class RdpPane extends BorderPane {
     private HBox exitBar;                 // 顶部悬浮"退出全屏"按钮（mstsc风格）
     private PauseTransition hideExitBarTimer;
     private TranslateTransition exitBarSlide;
+    private boolean exitBarPinned;
     private java.awt.KeyEventDispatcher fullScreenKeyDispatcher; // 常驻拦截Ctrl+Shift+Enter切换全屏（Swing焦点场景，校验焦点在RDP画布）
     private boolean fullScreenTransitioning; // 防止fullScreen/close监听器重入，造成视图留在已关闭的Scene中
     private long sceneRefreshGeneration;     // 丢弃快速连续切换产生的过期刷新任务
@@ -613,24 +617,69 @@ public class RdpPane extends BorderPane {
         // 全屏期间背景全黑：缩放取整产生的边缘缝隙显示为黑色而不是浅色底
         setStyle("-fx-background-color: black;");
 
-        // 顶部悬浮"退出全屏"按钮
-        exitBar = new HBox();
+        // 顶部悬浮控制条。默认不固定：鼠标离开5秒后收起；固定后始终显示。
+        exitBarPinned = false;
+        exitBar = new HBox(8);
         exitBar.setAlignment(Pos.CENTER);
-        exitBar.setStyle("-fx-background-color: rgba(0,120,215,0.92); -fx-background-radius: 0 0 8 8;"
-                + " -fx-padding: 5 14 5 14; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 6, 0.3, 0, 2);");
+        exitBar.setPrefWidth(520);
+        exitBar.setMaxWidth(760);
+        exitBar.setMinHeight(Region.USE_PREF_SIZE);
+        exitBar.setMaxHeight(Region.USE_PREF_SIZE);
+        exitBar.setStyle("-fx-background-color: linear-gradient(to bottom, #3d8bd2, #07519a);"
+                + " -fx-background-radius: 0 0 8 8; -fx-border-color: #75b8f0;"
+                + " -fx-border-width: 0 1 1 1; -fx-border-radius: 0 0 8 8;"
+                + " -fx-padding: 4 10 4 10;"
+                + " -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 7, 0.3, 0, 2);");
+
+        ToggleButton pinBtn = new ToggleButton();
+        pinBtn.setFocusTraversable(false);
+        pinBtn.setMinWidth(Region.USE_PREF_SIZE);
+        pinBtn.setGraphic(createPinIcon());
+        pinBtn.setTooltip(new Tooltip("固定控制条"));
+        pinBtn.setStyle(controlBarButtonStyle(false));
+        pinBtn.selectedProperty().addListener((obs, oldValue, pinned) -> {
+            exitBarPinned = pinned;
+            pinBtn.setTooltip(new Tooltip(pinned ? "取消固定控制条" : "固定控制条"));
+            pinBtn.setStyle(controlBarButtonStyle(pinned));
+            if (pinned) {
+                if (hideExitBarTimer != null) hideExitBarTimer.stop();
+                showExitBar();
+            } else if (hideExitBarTimer != null) {
+                hideExitBarTimer.playFromStart();
+            }
+        });
+
+        Button qualityBtn = new Button();
+        qualityBtn.setFocusTraversable(false);
+        qualityBtn.setMinWidth(Region.USE_PREF_SIZE);
+        qualityBtn.setGraphic(createSignalIcon());
+        qualityBtn.setTooltip(new Tooltip("查看连接质量"));
+        qualityBtn.setStyle(controlBarButtonStyle(false));
+        qualityBtn.setOnAction(e -> showConnectionQuality());
+
+        Label titleLabel = new Label(ownerTab.getText() != null ? ownerTab.getText() : "远程桌面");
+        titleLabel.setAlignment(Pos.CENTER);
+        titleLabel.setMinWidth(0);
+        titleLabel.setMaxWidth(Double.MAX_VALUE);
+        titleLabel.setStyle("-fx-text-fill: white; -fx-font-size: 14px;");
+        HBox.setHgrow(titleLabel, Priority.ALWAYS);
+
         Button exitBtn = new Button("退出全屏");
-        exitBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: white; -fx-font-size: 12px;"
-                + " -fx-padding: 2 4 2 4; -fx-cursor: hand;");
+        exitBtn.setFocusTraversable(false);
+        exitBtn.setMinWidth(Region.USE_PREF_SIZE);
+        exitBtn.setStyle(controlBarButtonStyle(false));
         exitBtn.setOnAction(e -> exitFullScreen());
-        exitBar.getChildren().add(exitBtn);
-        exitBar.setVisible(false);
-        exitBar.setManaged(false);
-        exitBar.setTranslateY(-40);
+        exitBar.getChildren().addAll(pinBtn, qualityBtn, titleLabel, exitBtn);
+        exitBar.setVisible(true);
+        exitBar.setTranslateY(0);
+        StackPane.setAlignment(exitBar, Pos.TOP_CENTER);
         // 鼠标悬停在按钮上时保持显示，移开后计时隐藏
         exitBar.setOnMouseEntered(e -> { if (hideExitBarTimer != null) hideExitBarTimer.stop(); });
-        exitBar.setOnMouseExited(e -> { if (hideExitBarTimer != null) hideExitBarTimer.playFromStart(); });
+        exitBar.setOnMouseExited(e -> {
+            if (!exitBarPinned && hideExitBarTimer != null) hideExitBarTimer.playFromStart();
+        });
 
-        hideExitBarTimer = new PauseTransition(Duration.millis(2500));
+        hideExitBarTimer = new PauseTransition(Duration.seconds(5));
         hideExitBarTimer.setOnFinished(e -> hideExitBar());
 
         // 顶部透明感应条：SwingNode会拦截鼠标事件导致Scene过滤器收不到，
@@ -646,10 +695,6 @@ public class RdpPane extends BorderPane {
         fullScreenRoot = new StackPane(this);
         fullScreenRoot.setStyle("-fx-background-color: black;");
         fullScreenRoot.getChildren().addAll(topEdgeTrigger, exitBar);
-        // managed=false时StackPane不再自动布局exitBar，手动绑定顶部居中定位
-        // （layoutY保持0贴顶，隐藏态通过translateY滑出屏幕外实现）
-        exitBar.layoutXProperty().bind(
-                fullScreenRoot.widthProperty().subtract(exitBar.widthProperty()).divide(2));
 
         Scene scene = new Scene(fullScreenRoot, Color.BLACK);
         // 兜底：鼠标靠近顶部边沿（5px内）时显示退出按钮
@@ -701,6 +746,9 @@ public class RdpPane extends BorderPane {
             }
             stage.setFullScreen(true);
             fullScreenTransitioning = false;
+            if (!exitBarPinned && hideExitBarTimer != null) {
+                hideExitBarTimer.playFromStart();
+            }
             refreshDesktopAfterSceneChange();
         });
     }
@@ -721,6 +769,7 @@ public class RdpPane extends BorderPane {
         exitBar = null;
         hideExitBarTimer = null;
         exitBarSlide = null;
+        exitBarPinned = false;
         // 恢复缩放（窗口模式1:1显示）
         if (swingNode != null) {
             swingNode.getTransforms().clear();
@@ -791,7 +840,10 @@ public class RdpPane extends BorderPane {
     }
 
     private void showExitBar() {
-        if (exitBar == null || exitBar.isVisible()) {
+        if (exitBar == null) {
+            return;
+        }
+        if (exitBar.isVisible() && exitBar.getTranslateY() == 0) {
             return;
         }
         exitBar.setVisible(true);
@@ -801,13 +853,10 @@ public class RdpPane extends BorderPane {
         exitBarSlide = new TranslateTransition(Duration.millis(200), exitBar);
         exitBarSlide.setToY(0);
         exitBarSlide.play();
-        if (hideExitBarTimer != null) {
-            hideExitBarTimer.playFromStart();
-        }
     }
 
     private void hideExitBar() {
-        if (exitBar == null || !exitBar.isVisible()) {
+        if (exitBarPinned || exitBar == null || !exitBar.isVisible()) {
             return;
         }
         if (exitBarSlide != null) {
@@ -822,6 +871,43 @@ public class RdpPane extends BorderPane {
             }
         });
         exitBarSlide.play();
+    }
+
+    private String controlBarButtonStyle(boolean selected) {
+        return "-fx-background-color: " + (selected ? "rgba(255,255,255,0.28)" : "transparent") + ";"
+                + " -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 3 8 3 8;"
+                + " -fx-background-radius: 4; -fx-cursor: hand;";
+    }
+
+    private SVGPath createPinIcon() {
+        SVGPath icon = new SVGPath();
+        icon.setContent("M14 4V2H10V4L11 5V9L9 11V13H11.25L12 18L12.75 13H15V11L13 9V5Z");
+        icon.setFill(Color.WHITE);
+        return icon;
+    }
+
+    private SVGPath createSignalIcon() {
+        SVGPath icon = new SVGPath();
+        icon.setContent("M2 14H4V18H2ZM6 11H8V18H6ZM10 8H12V18H10ZM14 5H16V18H14Z");
+        icon.setFill(Color.WHITE);
+        return icon;
+    }
+
+    private void showConnectionQuality() {
+        if (hideExitBarTimer != null) {
+            hideExitBarTimer.stop();
+        }
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        if (fullScreenStage != null) {
+            alert.initOwner(fullScreenStage);
+        }
+        alert.setTitle("远程桌面连接");
+        alert.setHeaderText(null);
+        alert.setContentText("与远程计算机连接的质量非常好。");
+        alert.showAndWait();
+        if (!exitBarPinned && hideExitBarTimer != null) {
+            hideExitBarTimer.playFromStart();
+        }
     }
 
     private void resizeDesktopViewport() {
