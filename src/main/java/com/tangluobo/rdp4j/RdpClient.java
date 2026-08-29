@@ -18,6 +18,7 @@ import javax.swing.JComponent;
 import javax.swing.SwingUtilities;
 
 import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
+import com.tangluobo.rdp4j.graphics.WrappedImage;
 import com.tangluobo.rdp4j.io.DefaultIO;
 import com.tangluobo.rdp4j.keymapping.KeyCode_FileBased;
 import com.tangluobo.rdp4j.layers.Rdp;
@@ -60,6 +61,7 @@ public class RdpClient {
     private volatile boolean soundEnabled = true;
     private volatile RdpsndChannel rdpsndChannel;
     private final AtomicLong attemptSequence = new AtomicLong();
+    private final AtomicLong firstFrameNotifiedAttempt = new AtomicLong();
     private final AtomicBoolean disconnectNotified = new AtomicBoolean();
     private volatile long currentAttemptId;
 
@@ -303,6 +305,7 @@ public class RdpClient {
         canvas = new RdesktopCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
+        configureDisplayFrameCallback(canvas, attemptId);
 
         // Windows只在客户端声明RDPDR时启动RDPSND服务端。
         registerRdpdrChannel(channels);
@@ -312,7 +315,7 @@ public class RdpClient {
 
         // 注册音频重定向通道（保持MSTSC典型静态通道顺序）
         registerSoundChannel(channels);
-        registerGraphicsChannel(channels);
+        registerGraphicsChannel(channels, attemptId);
 
         // 创建RDP层（使用RdpPatch修复rdp5_process加密bug）
         rdpLayer = new RdpPatch(context, state, channels);
@@ -491,14 +494,9 @@ public class RdpClient {
     }
 
     /** Registers MS-RDPEDYC for the graphics pipeline and high-resolution cursors. */
-    private void registerGraphicsChannel(VChannels channels) {
+    private void registerGraphicsChannel(VChannels channels, long attemptId) {
         try {
-            channels.register(new DrdynvcChannel(() -> {
-                Consumer<Void> callback = onFirstFrame;
-                if (callback != null) {
-                    callback.accept(null);
-                }
-            }));
+            channels.register(new DrdynvcChannel(() -> notifyFirstFrame(attemptId)));
             logger.info("动态图形通道(drdynvc/rdpgfx)已注册");
         } catch (RdesktopException e) {
             logger.log(Level.WARNING, "注册动态图形通道失败: " + e.getMessage());
@@ -582,6 +580,7 @@ public class RdpClient {
             canvas = new RdesktopCanvas(context, state);
             context.bindCanvas(canvas);
             state.setCanvas(canvas);
+            configureDisplayFrameCallback(canvas, attemptId);
 
             // 重新创建RDP层（FixedVChannels修复库分片重组NPE）
             VChannels channels = new FixedVChannels(state);
@@ -589,7 +588,7 @@ public class RdpClient {
             // 回退重连后重新注册剪贴板通道（重建VChannels/Canvas后原注册已丢失）
             registerClipboardChannel(state, canvas, channels);
             registerSoundChannel(channels);
-            registerGraphicsChannel(channels);
+            registerGraphicsChannel(channels, attemptId);
             rdpLayer = new RdpPatch(context, state, channels);
             configureFrameCallback((RdpPatch) rdpLayer, attemptId);
 
@@ -644,6 +643,7 @@ public class RdpClient {
             canvas = new RdesktopCanvas(context, state);
             context.bindCanvas(canvas);
             state.setCanvas(canvas);
+            configureDisplayFrameCallback(canvas, attemptId);
 
             // 重新创建RDP层（FixedVChannels修复库分片重组NPE）
             VChannels channels = new FixedVChannels(state);
@@ -651,7 +651,7 @@ public class RdpClient {
             // 回退重连后重新注册剪贴板通道（重建VChannels/Canvas后原注册已丢失）
             registerClipboardChannel(state, canvas, channels);
             registerSoundChannel(channels);
-            registerGraphicsChannel(channels);
+            registerGraphicsChannel(channels, attemptId);
             rdpLayer = new RdpPatch(context, state, channels);
             configureFrameCallback((RdpPatch) rdpLayer, attemptId);
 
@@ -872,12 +872,13 @@ public class RdpClient {
         canvas = new RdesktopCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
+        configureDisplayFrameCallback(canvas, attemptId);
 
         VChannels channels = new FixedVChannels(state);
         registerRdpdrChannel(channels);
         registerClipboardChannel(state, canvas, channels);
         registerSoundChannel(channels);
-        registerGraphicsChannel(channels);
+        registerGraphicsChannel(channels, attemptId);
         rdpLayer = new RdpPatch(context, state, channels);
         configureFrameCallback((RdpPatch) rdpLayer, attemptId);
 
@@ -916,12 +917,13 @@ public class RdpClient {
         canvas = new RdesktopCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
+        configureDisplayFrameCallback(canvas, attemptId);
 
         VChannels channels = new FixedVChannels(state);
         registerRdpdrChannel(channels);
         registerClipboardChannel(state, canvas, channels);
         registerSoundChannel(channels);
-        registerGraphicsChannel(channels);
+        registerGraphicsChannel(channels, attemptId);
         rdpLayer = new RdpPatch(context, state, channels);
         configureFrameCallback((RdpPatch) rdpLayer, attemptId);
 
@@ -1088,15 +1090,28 @@ public class RdpClient {
     }
 
     private void configureFrameCallback(RdpPatch patch, long attemptId) {
-        patch.setOnFirstFrame(v -> {
-            if (attemptId != currentAttemptId) {
-                return;
-            }
-            Consumer<Void> callback = onFirstFrame;
-            if (callback != null) {
-                callback.accept(null);
-            }
-        });
+        patch.setOnFirstFrame(v -> notifyFirstFrame(attemptId));
+    }
+
+    private void configureDisplayFrameCallback(RdesktopCanvas targetCanvas, long attemptId) {
+        if (targetCanvas.getDisplay() instanceof WrappedImage display) {
+            // Drawing orders, legacy bitmap updates and RDPGFX all repaint the
+            // backing component after pixels have been committed. This is the
+            // common fallback for servers whose first frame is not a bitmap PDU.
+            display.setFirstRemoteUpdateListener(() -> notifyFirstFrame(attemptId));
+        }
+    }
+
+    private void notifyFirstFrame(long attemptId) {
+        if (attemptId != currentAttemptId
+                || firstFrameNotifiedAttempt.getAndSet(attemptId) == attemptId
+                || attemptId != currentAttemptId) {
+            return;
+        }
+        Consumer<Void> callback = onFirstFrame;
+        if (callback != null) {
+            callback.accept(null);
+        }
     }
 
     /**

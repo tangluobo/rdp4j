@@ -363,7 +363,7 @@ public class RdesktopCanvas {
 			y = this.top;
 		cy = clipbottom - y + 1;
 		rop.do_array(destblt.getOpcode(), backstore, this.width, x, y, cx, cy, null, 0, 0, 0);
-		backstore.repaint(x, y, cx, cy);
+		backstore.repaintRemote(x, y, cx, cy);
 	}
 
 	/**
@@ -462,7 +462,7 @@ public class RdesktopCanvas {
 		}
 		// if(logger.isInfoEnabled()) logger.info("glyph
 		// \t(\t"+x+",\t"+y+"),(\t"+(x+cx-1)+",\t"+(y+cy-1)+")");
-		backstore.repaint(newx, newy, newcx, newcy);
+		backstore.repaintRemote(newx, newy, newcx, newcy);
 	}
 
 	/**
@@ -534,7 +534,7 @@ public class RdesktopCanvas {
 		int x_max = x1 > x2 ? x1 : x2;
 		int y_min = y1 < y2 ? y1 : y2;
 		int y_max = y1 > y2 ? y1 : y2;
-		backstore.repaint(x_min, y_min, x_max - x_min + 1, y_max - y_min + 1);
+		backstore.repaintRemote(x_min, y_min, x_max - x_min + 1, y_max - y_min + 1);
 	}
 
 	/**
@@ -580,7 +580,7 @@ public class RdesktopCanvas {
 						rop.do_pixel(opcode, backstore, x1 + i, y1, color);
 						pbackstore++;
 					}
-					backstore.repaint(x1, y1, x2 - x1 + 1, 1);
+					backstore.repaintRemote(x1, y1, x2 - x1 + 1, 1);
 				} else { // x dec, y1=y2
 					if (x2 < this.left)
 						x2 = this.left;
@@ -591,7 +591,7 @@ public class RdesktopCanvas {
 						rop.do_pixel(opcode, backstore, x2 + i, y1, color);
 						pbackstore--;
 					}
-					backstore.repaint(x2, y1, x1 - x2 + 1, 1);
+					backstore.repaintRemote(x2, y1, x1 - x2 + 1, 1);
 				}
 			}
 		} else { // x1==x2 VERTICAL
@@ -606,7 +606,7 @@ public class RdesktopCanvas {
 						rop.do_pixel(opcode, backstore, x1, y1 + i, color);
 						pbackstore += this.width;
 					}
-					backstore.repaint(x1, y1, 1, y2 - y1 + 1);
+					backstore.repaintRemote(x1, y1, 1, y2 - y1 + 1);
 				} else { // x1=x2, y dec
 					if (y2 < this.top)
 						y2 = this.top;
@@ -617,7 +617,7 @@ public class RdesktopCanvas {
 						rop.do_pixel(opcode, backstore, x1, y2 + i, color);
 						pbackstore -= this.width;
 					}
-					backstore.repaint(x1, y2, 1, y1 - y2 + 1);
+					backstore.repaintRemote(x1, y2, 1, y1 - y2 + 1);
 				}
 			}
 		}
@@ -667,7 +667,7 @@ public class RdesktopCanvas {
 			}
 			rop.do_array(memblt.getOpcode(), backstore, this.width, x, y, cx, cy, bitmap.getBitmapData(), bitmap.getWidth(), srcx,
 					srcy);
-			backstore.repaint(x, y, cx, cy);
+			backstore.repaintRemote(x, y, cx, cy);
 		} catch (RdesktopException e) {
 		}
 	}
@@ -770,7 +770,7 @@ public class RdesktopCanvas {
 		srcx += x - screenblt.getX();
 		srcy += y - screenblt.getY();
 		rop.do_array(screenblt.getOpcode(), backstore, this.width, x, y, cx, cy, null, this.width, srcx, srcy);
-		backstore.repaint(x, y, cx, cy);
+		backstore.repaintRemote(x, y, cx, cy);
 	}
 
 	/**
@@ -873,7 +873,7 @@ public class RdesktopCanvas {
 			logger.debug("rect \t(\t" + x + ",\t" + y + "),(\t" + (x + cx - 1) + ",\t" + (y + cy - 1) + ")/"
 					+ backstore.getDisplayWidth() + "x" + backstore.getDisplayHeight());
 		backstore.setRGB(x, y, cx, cy, rect, 0, cx);
-		backstore.repaint(x, y, cx, cy); // seems to be faster than
+		backstore.repaintRemote(x, y, cx, cy); // seems to be faster than
 											// Graphics.fillRect
 		// according to JProbe
 	}
@@ -976,7 +976,7 @@ public class RdesktopCanvas {
 				logger.debug("x=" + x + " y=" + y + " cx=" + cx + " cy=" + cy + " width=" + this.width + " height=" + this.height
 						+ " imgwidth=" + backstore.getDisplayWidth() + " imgheight=" + backstore.getDisplayHeight());
 			rop.do_array(opcode, backstore, this.width, x, y, cx, cy, src, cx, 0, 0);
-			backstore.repaint(x, y, cx, cy);
+			backstore.repaintRemote(x, y, cx, cy);
 			break;
 		case 2: // hatch
 			System.out.println("hatch");
@@ -1003,7 +1003,7 @@ public class RdesktopCanvas {
 				}
 			}
 			rop.do_array(opcode, backstore, this.width, x, y, cx, cy, src, cx, 0, 0);
-			backstore.repaint(x, y, cx, cy);
+			backstore.repaintRemote(x, y, cx, cy);
 			break;
 		default:
 			logger.warn("Unsupported brush style " + brush.getStyle());
@@ -1026,7 +1026,7 @@ public class RdesktopCanvas {
 				// image, no
 				// offset needed
 				cx);
-		backstore.repaint(x, y, cx, cy);
+		backstore.repaintRemote(x, y, cx, cy);
 	}
 
 	// @Override

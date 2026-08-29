@@ -3,6 +3,7 @@ package com.tangluobo.rdp4j.graphics;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
@@ -75,6 +76,21 @@ class RdesktopCanvasCursorTest {
         assertEquals(0xffff00ff, image.getRGB(2, 1));
         assertEquals(1, cursor.getHotspot().x, "hotspot is already expressed in top-down image coordinates");
         assertEquals(0, cursor.getHotspot().y);
+    }
+
+    @Test
+    void firstRemoteUpdateListenerFiresOnceOnFirstNonEmptyRepaint() {
+        WrappedImage image = new WrappedImage(8, 8,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+        AtomicInteger callbacks = new AtomicInteger();
+        image.setFirstRemoteUpdateListener(callbacks::incrementAndGet);
+
+        image.repaintRemote(0, 0, 0, 0);
+        assertEquals(0, callbacks.get());
+        image.repaintRemote(0, 0, 2, 2);
+        image.repaintRemote(0, 0, 2, 2);
+
+        assertEquals(1, callbacks.get());
     }
 
     private static RdesktopCanvas createCanvas() {

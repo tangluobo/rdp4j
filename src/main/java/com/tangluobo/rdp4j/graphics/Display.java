@@ -65,6 +65,11 @@ public interface Display {
 
 	void repaint(int x, int y, int cx, int cy);
 
+	/** Repaint caused by newly decoded remote desktop pixels or drawing orders. */
+	default void repaintRemote(int x, int y, int cx, int cy) {
+		repaint(x, y, cx, cy);
+	}
+
 	void resizeDisplay(Dimension dimension);
 
 	void setCursor(RdpCursor cursor);

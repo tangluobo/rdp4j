@@ -846,7 +846,7 @@ public class Rdp implements Layer<Layer<?>> {
 				}
 			}
 		}
-		state.getCanvas().getDisplay().repaint(minX, minY, maxX - minX + 1, maxY - minY + 1);
+		state.getCanvas().getDisplay().repaintRemote(minX, minY, maxX - minX + 1, maxY - minY + 1);
 	}
 
 	/**

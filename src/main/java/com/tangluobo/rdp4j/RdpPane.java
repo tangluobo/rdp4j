@@ -75,6 +75,7 @@ public class RdpPane extends BorderPane {
     private SwingNode swingNode;
     private volatile JScrollPane desktopScrollPane;
     private volatile JComponent desktopDisplay;
+    private volatile JComponent displayBeingAttached;
     private volatile boolean windowScrollBarsSuppressed;
     private boolean directKeyboardBridgeLogged;
     private final WindowsImeController windowsImeController = new WindowsImeController();
@@ -321,6 +322,9 @@ public class RdpPane extends BorderPane {
         this.screenWidth = screenWidth;
         this.screenHeight = screenHeight;
         this.colorDepth = colorDepth;
+        desktopDisplay = null;
+        desktopScrollPane = null;
+        displayBeingAttached = null;
 
         // 更新状态栏
         updateStatus(ConnectionState.CONNECTING);
@@ -330,14 +334,16 @@ public class RdpPane extends BorderPane {
         // 先显示加载占位面板（Swing组件在EDT创建，SwingNode.setContent在JavaFX线程）
         SwingUtilities.invokeLater(() -> {
             JPanel loadingPanel = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.CENTER));
-            loadingPanel.setBackground(java.awt.Color.WHITE);
+            loadingPanel.setBackground(new java.awt.Color(32, 32, 32));
             JLabel loadingLabel = new JLabel("正在连接到 " + host + " ...");
             loadingLabel.setFont(loadingLabel.getFont().deriveFont(java.awt.Font.PLAIN, 14));
+            loadingLabel.setForeground(new java.awt.Color(230, 230, 230));
             loadingPanel.add(loadingLabel);
             Platform.runLater(() -> swingNode.setContent(loadingPanel));
         });
 
-        // 设置连接就绪回调 - 连接成功后才设置画布到SwingNode
+        // DISPLAY ready只表示协议和绘图通道可用。此时画布仍可能是0x0或
+        // 全黑，而且服务端可能马上要求会话重定向；不要提前替换加载页。
         rdpClient.setOnConnected(v -> {
             final JComponent displayComponent = rdpClient.getDisplayComponent();
             if (displayComponent == null) {
@@ -345,51 +351,9 @@ public class RdpPane extends BorderPane {
                 Platform.runLater(() -> updateStatus(ConnectionState.ERROR));
                 return;
             }
-            logger.info("RDP显示组件: " + displayComponent.getClass().getSimpleName()
+            logger.info("RDP显示通道已就绪，等待首帧: " + displayComponent.getClass().getSimpleName()
                     + " size=" + displayComponent.getSize()
                     + " prefSize=" + displayComponent.getPreferredSize());
-			// SwingNode maps AWT custom cursors to Cursor.DEFAULT. RDP pointer
-			// shapes (including window-edge resize arrows) are all custom images,
-			// so pass their source image directly to JavaFX instead.
-			if (displayComponent instanceof WrappedImage wrappedImage) {
-				wrappedImage.setRdpCursorListener(this::updateFxCursor);
-			}
-
-            // 在EDT上用JScrollPane包装显示组件（WrappedImage实现了Scrollable）
-            SwingUtilities.invokeLater(() -> {
-                displayComponent.setSize(displayComponent.getPreferredSize());
-                // 用GridBag居中宿主承载远程画布：窗口大于远程分辨率时画面保持
-                // 水平、垂直居中；窗口缩小时宿主仍以画布首选尺寸参与滚动计算。
-                JPanel canvasHost = new JPanel(new GridBagLayout());
-                canvasHost.setBackground(java.awt.Color.BLACK);
-                canvasHost.add(displayComponent);
-                JScrollPane scrollPane = new JScrollPane(canvasHost);
-                scrollPane.setBackground(java.awt.Color.BLACK);
-                scrollPane.getViewport().setBackground(java.awt.Color.BLACK);
-                // 去掉Metal LAF默认的四边线边框（全屏时会呈现为屏幕四周的白线）
-                scrollPane.setBorder(null);
-                scrollPane.getViewport().setBorder(null);
-                applyWindows10ScrollBars(scrollPane);
-                if (windowScrollBarsSuppressed) {
-                    scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-                    scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-                }
-                scrollPane.setDoubleBuffered(true);
-                desktopDisplay = displayComponent;
-                desktopScrollPane = scrollPane;
-                // 在JavaFX Application Thread上设置SwingNode内容
-                Platform.runLater(() -> {
-                    swingNode.setContent(scrollPane);
-                    resizeDesktopViewport();
-                    SwingUtilities.invokeLater(() -> {
-                        displayComponent.revalidate();
-                        displayComponent.repaint();
-                        displayComponent.requestFocusInWindow();
-                    });
-                    // DISPLAY ready 仅说明协议握手已完成；等待首个 bitmap 后再显示已连接。
-                });
-            });
-            // 诊断日志已在RdpPatch.processBitmapUpdates中实现，此处不再重复
         });
 
         // 设置断开回调
@@ -400,7 +364,7 @@ public class RdpPane extends BorderPane {
             });
         });
 
-        rdpClient.setOnFirstFrame(v -> Platform.runLater(() -> updateStatus(ConnectionState.CONNECTED)));
+        rdpClient.setOnFirstFrame(v -> attachDesktopAfterFirstFrame());
 
         // 在EDT中初始化RDP连接（画布不在SwingNode中显示，直到onConnected回调）
         SwingUtilities.invokeLater(() -> {
@@ -415,6 +379,81 @@ public class RdpPane extends BorderPane {
                 });
             }
         });
+    }
+
+    /** Keeps the stable loading surface visible until the current attempt has pixels to show. */
+    private void attachDesktopAfterFirstFrame() {
+        final JComponent displayComponent = rdpClient.getDisplayComponent();
+        if (displayComponent == null) {
+            logger.warning("RDP已收到首帧，但显示组件为null");
+            return;
+        }
+        synchronized (this) {
+            if (displayComponent == desktopDisplay || displayComponent == displayBeingAttached) {
+                return;
+            }
+            displayBeingAttached = displayComponent;
+        }
+
+		// SwingNode maps AWT custom cursors to Cursor.DEFAULT. RDP pointer
+		// shapes (including window-edge resize arrows) are all custom images,
+		// so pass their source image directly to JavaFX instead.
+		if (displayComponent instanceof WrappedImage wrappedImage) {
+			wrappedImage.setRdpCursorListener(this::updateFxCursor);
+		}
+
+        SwingUtilities.invokeLater(() -> {
+            if (!isCurrentDisplay(displayComponent)) {
+                clearDisplayBeingAttached(displayComponent);
+                return;
+            }
+            displayComponent.setSize(displayComponent.getPreferredSize());
+            // 用GridBag居中宿主承载远程画布：窗口大于远程分辨率时画面保持
+            // 水平、垂直居中；窗口缩小时宿主仍以画布首选尺寸参与滚动计算。
+            JPanel canvasHost = new JPanel(new GridBagLayout());
+            canvasHost.setBackground(java.awt.Color.BLACK);
+            canvasHost.add(displayComponent);
+            JScrollPane scrollPane = new JScrollPane(canvasHost);
+            scrollPane.setBackground(java.awt.Color.BLACK);
+            scrollPane.getViewport().setBackground(java.awt.Color.BLACK);
+            scrollPane.setBorder(null);
+            scrollPane.getViewport().setBorder(null);
+            applyWindows10ScrollBars(scrollPane);
+            if (windowScrollBarsSuppressed) {
+                scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
+                scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+            }
+            scrollPane.setDoubleBuffered(true);
+
+            Platform.runLater(() -> {
+                if (!isCurrentDisplay(displayComponent)) {
+                    clearDisplayBeingAttached(displayComponent);
+                    return;
+                }
+                desktopDisplay = displayComponent;
+                desktopScrollPane = scrollPane;
+                clearDisplayBeingAttached(displayComponent);
+                swingNode.setContent(scrollPane);
+                resizeDesktopViewport();
+                updateStatus(ConnectionState.CONNECTED);
+                logger.info("RDP首帧已就绪，显示远程桌面");
+                SwingUtilities.invokeLater(() -> {
+                    displayComponent.revalidate();
+                    displayComponent.repaint();
+                    displayComponent.requestFocusInWindow();
+                });
+            });
+        });
+    }
+
+    private boolean isCurrentDisplay(JComponent displayComponent) {
+        return rdpClient.isConnected() && rdpClient.getDisplayComponent() == displayComponent;
+    }
+
+    private synchronized void clearDisplayBeingAttached(JComponent displayComponent) {
+        if (displayBeingAttached == displayComponent) {
+            displayBeingAttached = null;
+        }
     }
 
 	private void updateFxCursor(RdpCursor rdpCursor) {
@@ -573,6 +612,7 @@ public class RdpPane extends BorderPane {
      */
     public void disconnect() {
         windowsImeController.restore();
+        displayBeingAttached = null;
         // 断开前先退出全屏，把组件还原到tab中，避免全屏窗口残留
         if (fullScreenStage != null) {
             exitFullScreen();

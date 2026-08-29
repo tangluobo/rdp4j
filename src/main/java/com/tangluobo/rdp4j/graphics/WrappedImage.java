@@ -39,6 +39,7 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	private RdesktopCanvas canvas;
 	private IndexColorModel cm = null;
 	private volatile Consumer<RdpCursor> cursorListener;
+	private volatile Runnable firstRemoteUpdateListener;
 
 	public WrappedImage(int width, int height, int imgType) {
 		bi = new BufferedImage(width, height, imgType);
@@ -181,6 +182,32 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	 */
 	public void setRdpCursorListener(Consumer<RdpCursor> cursorListener) {
 		this.cursorListener = cursorListener;
+	}
+
+	/**
+	 * Registers a one-shot callback for the first repaint requested after remote
+	 * pixels or drawing orders have been committed to this backing image.
+	 */
+	public void setFirstRemoteUpdateListener(Runnable listener) {
+		this.firstRemoteUpdateListener = listener;
+	}
+
+	@Override
+	public void repaintRemote(int x, int y, int width, int height) {
+		repaint(x, y, width, height);
+		if (width <= 0 || height <= 0) {
+			return;
+		}
+		Runnable listener = firstRemoteUpdateListener;
+		if (listener != null) {
+			synchronized (this) {
+				if (firstRemoteUpdateListener != listener) {
+					return;
+				}
+				firstRemoteUpdateListener = null;
+			}
+			listener.run();
+		}
 	}
 
 	/**

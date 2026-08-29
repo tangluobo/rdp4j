@@ -726,7 +726,7 @@ final class DrdynvcChannel extends VChannel {
             }
             state.getCanvas().displayImage(pixels, width, height,
                     destinationX, destinationY, width, height);
-            state.getCanvas().getDisplay().repaint(destinationX, destinationY, width, height);
+            state.getCanvas().getDisplay().repaintRemote(destinationX, destinationY, width, height);
             rendered = true;
         }
         dirtySurfaces.clear();
