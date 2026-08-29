@@ -15,6 +15,7 @@ import java.util.logging.Logger;
 
 import javax.net.ssl.X509TrustManager;
 import javax.swing.JComponent;
+import javax.swing.SwingUtilities;
 
 import com.tangluobo.tomato.rdp.graphics.RdesktopCanvas;
 import com.tangluobo.tomato.rdp.io.DefaultIO;
@@ -1103,6 +1104,40 @@ public class RdpClient {
      */
     public JComponent getDisplayComponent() {
         return canvas != null ? (JComponent) canvas.getDisplay() : null;
+    }
+
+    /**
+     * Forward a host-toolkit key press/release directly to the RDP input
+     * pipeline. This bypasses SwingNode's character-dependent FX-to-AWT
+     * translation, which can discard physical keys while a local IME is on.
+     *
+     * @return true when the event was accepted for dispatch
+     */
+    public boolean forwardKeyboardEvent(int id, int modifiers, int keyCode, int keyLocation) {
+        if (!connected || (id != java.awt.event.KeyEvent.KEY_PRESSED
+                && id != java.awt.event.KeyEvent.KEY_RELEASED)) {
+            return false;
+        }
+        RdesktopCanvas targetCanvas = canvas;
+        if (targetCanvas == null || !(targetCanvas.getDisplay() instanceof java.awt.Component component)) {
+            return false;
+        }
+
+        Runnable dispatch = () -> {
+            if (!connected || canvas != targetCanvas || targetCanvas.getInput() == null) {
+                return;
+            }
+            java.awt.event.KeyEvent event = new java.awt.event.KeyEvent(
+                    component, id, System.currentTimeMillis(), modifiers, keyCode,
+                    java.awt.event.KeyEvent.CHAR_UNDEFINED, keyLocation);
+            targetCanvas.getInput().dispatchKeyEvent(event);
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            dispatch.run();
+        } else {
+            SwingUtilities.invokeLater(dispatch);
+        }
+        return true;
     }
 
     /**

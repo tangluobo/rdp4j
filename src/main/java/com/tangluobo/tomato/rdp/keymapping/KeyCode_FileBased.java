@@ -282,16 +282,21 @@ public class KeyCode_FileBased {
 					mapCodeSet = true;
 				}
 			}
-			// Add a set of mappings for alphabet characters with ctrl and alt
-			// pressed
+			// Printable keys historically relied on KEY_TYPED to determine their
+			// scancode. SwingNode receives its events through JavaFX, and a local
+			// Windows IME can suppress KEY_TYPED while still delivering KEY_PRESSED.
+			// Add key-code mappings for unmodified printable keys so their physical
+			// press/release pair is always sent to the remote keyboard layout/IME.
+			// A matched KEY_PRESSED also suppresses its following KEY_TYPED event.
 			Vector newMap = new Vector();
 			Iterator i = keyMap.iterator();
 			while (i.hasNext()) {
 				MapDef current = (MapDef) i.next();
 				if (current.isCharacterDef()
 						&& !(current.isAltDown() || current.isCtrlDown() || current.isShiftDown() || current.isCapslockOn())) {
-					int code = getCodeFromAlphaChar(current.getKeyChar());
+					int code = getCodeFromBaseCharacter(current.getKeyChar());
 					if (code > -1) {
+						newMap.add(new MapDef(options, code, 0, current.getScancode(), false, false, false, false));
 						newMap.add(new MapDef(options, code, 0, current.getScancode(), true, false, false, false));
 						newMap.add(new MapDef(options, code, 0, current.getScancode(), false, false, true, false));
 					}
@@ -419,20 +424,36 @@ public class KeyCode_FileBased {
 	}
 
 	/**
-	 * Given an alphanumeric character, return an AWT keycode
+	 * Given an unmodified printable character, return an AWT keycode.
+	 *
+	 * <p>Only base (unshifted) characters are accepted. Their scancodes come
+	 * from the selected RDP keymap, so layouts such as AZERTY retain their own
+	 * physical positions.</p>
 	 * 
-	 * @param keyChar Alphanumeric character
-	 * @return AWT keycode representing input character, -1 if character not
-	 *         alphanumeric
+	 * @param keyChar printable character
+	 * @return AWT keycode representing the base key, or -1 if unsupported
 	 */
-	private int getCodeFromAlphaChar(char keyChar) {
+	private int getCodeFromBaseCharacter(char keyChar) {
 		if (('a' <= keyChar) && (keyChar <= 'z')) {
 			return KeyEvent.VK_A + keyChar - 'a';
 		}
-		if (('A' <= keyChar) && (keyChar <= 'Z')) {
-			return KeyEvent.VK_A + keyChar - 'A';
+		if (('0' <= keyChar) && (keyChar <= '9')) {
+			return KeyEvent.VK_0 + keyChar - '0';
 		}
-		return -1;
+		switch (keyChar) {
+		case '`': return KeyEvent.VK_BACK_QUOTE;
+		case '-': return KeyEvent.VK_MINUS;
+		case '=': return KeyEvent.VK_EQUALS;
+		case '[': return KeyEvent.VK_OPEN_BRACKET;
+		case ']': return KeyEvent.VK_CLOSE_BRACKET;
+		case '\\': return KeyEvent.VK_BACK_SLASH;
+		case ';': return KeyEvent.VK_SEMICOLON;
+		case '\'': return KeyEvent.VK_QUOTE;
+		case ',': return KeyEvent.VK_COMMA;
+		case '.': return KeyEvent.VK_PERIOD;
+		case '/': return KeyEvent.VK_SLASH;
+		default: return -1;
+		}
 	}
 
 	private void registerKeyEvent(KeyEvent e, MapDef m) {

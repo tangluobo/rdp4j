@@ -9,6 +9,8 @@ import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.nio.IntBuffer;
+import java.util.EnumSet;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -74,6 +76,10 @@ public class RdpPane extends BorderPane {
     private volatile JScrollPane desktopScrollPane;
     private volatile JComponent desktopDisplay;
     private volatile boolean windowScrollBarsSuppressed;
+    private boolean directKeyboardBridgeLogged;
+    private final WindowsImeController windowsImeController = new WindowsImeController();
+    private final Set<javafx.scene.input.KeyCode> locallyConsumedFxKeys =
+            EnumSet.noneOf(javafx.scene.input.KeyCode.class);
     private int verticalPolicyBeforeFullScreen = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED;
     private int horizontalPolicyBeforeFullScreen = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED;
 
@@ -118,6 +124,23 @@ public class RdpPane extends BorderPane {
     private void initializeUI() {
         // 中心：SwingNode嵌入RDP渲染
         swingNode = new SwingNode();
+        // SwingNode refuses to create an AWT KeyEvent when JavaFX reports an
+        // empty character string. Windows does exactly that for physical keys
+        // while a local Chinese IME is active, so intercept the FX event first
+        // and send its key code through the normal RDP input pipeline.
+        swingNode.addEventFilter(javafx.scene.input.KeyEvent.ANY, this::forwardFxKeyboardEvent);
+        swingNode.addEventFilter(javafx.scene.input.InputMethodEvent.ANY, event -> {
+            if (desktopDisplay != null && rdpClient.isConnected()) {
+                event.consume();
+            }
+        });
+        swingNode.focusedProperty().addListener((obs, wasFocused, focused) -> {
+            if (focused) {
+                windowsImeController.disableForFocusedWindow();
+            } else {
+                windowsImeController.restore();
+            }
+        });
         setCenter(swingNode);
         // SwingNode does not reliably propagate JavaFX layout changes to a nested
         // JScrollPane. Keep the Swing viewport in sync so resize exposes/repaints
@@ -161,6 +184,73 @@ public class RdpPane extends BorderPane {
 
         // 设置样式
         getStyleClass().add("rdp-pane");
+    }
+
+    private void forwardFxKeyboardEvent(javafx.scene.input.KeyEvent event) {
+        if (desktopDisplay == null || rdpClient == null || !rdpClient.isConnected()) {
+            return;
+        }
+
+        if (event.getEventType() == javafx.scene.input.KeyEvent.KEY_TYPED) {
+            // Press/release events are authoritative. Consuming KEY_TYPED also
+            // prevents locally committed IME text from entering the RDP path.
+            event.consume();
+            return;
+        }
+
+        javafx.scene.input.KeyCode code = event.getCode();
+        if (event.getEventType() == javafx.scene.input.KeyEvent.KEY_RELEASED
+                && locallyConsumedFxKeys.remove(code)) {
+            event.consume();
+            return;
+        }
+        if (event.getEventType() == javafx.scene.input.KeyEvent.KEY_PRESSED
+                && fullScreenKeys.match(event)) {
+            locallyConsumedFxKeys.add(code);
+            event.consume();
+            rdpClient.releaseRemoteModifierKeys();
+            toggleFullScreen();
+            return;
+        }
+
+        int awtId = event.getEventType() == javafx.scene.input.KeyEvent.KEY_PRESSED
+                ? java.awt.event.KeyEvent.KEY_PRESSED : java.awt.event.KeyEvent.KEY_RELEASED;
+        int awtKeyCode = code.getCode();
+        if (awtKeyCode == java.awt.event.KeyEvent.VK_UNDEFINED) {
+            logger.fine("忽略无法映射的JavaFX按键: " + code);
+            event.consume();
+            return;
+        }
+        if (rdpClient.forwardKeyboardEvent(
+                awtId, toAwtModifiers(event), awtKeyCode, toAwtKeyLocation(code))) {
+            if (!directKeyboardBridgeLogged) {
+                directKeyboardBridgeLogged = true;
+                logger.info("RDP JavaFX键盘桥已启用: firstKey=" + code
+                        + ", emptyCharacter=" + event.getCharacter().isEmpty());
+            }
+            // Do not let SwingNode forward the same event a second time when
+            // the local input method happens to be in English mode.
+            event.consume();
+        }
+    }
+
+    static int toAwtModifiers(javafx.scene.input.KeyEvent event) {
+        int modifiers = 0;
+        if (event.isShiftDown()) modifiers |= java.awt.event.InputEvent.SHIFT_DOWN_MASK;
+        if (event.isControlDown()) modifiers |= java.awt.event.InputEvent.CTRL_DOWN_MASK;
+        if (event.isAltDown()) modifiers |= java.awt.event.InputEvent.ALT_DOWN_MASK;
+        if (event.isMetaDown()) modifiers |= java.awt.event.InputEvent.META_DOWN_MASK;
+        return modifiers;
+    }
+
+    static int toAwtKeyLocation(javafx.scene.input.KeyCode code) {
+        return switch (code) {
+            case NUMPAD0, NUMPAD1, NUMPAD2, NUMPAD3, NUMPAD4,
+                    NUMPAD5, NUMPAD6, NUMPAD7, NUMPAD8, NUMPAD9,
+                    MULTIPLY, ADD, SEPARATOR, SUBTRACT, DECIMAL, DIVIDE ->
+                    java.awt.event.KeyEvent.KEY_LOCATION_NUMPAD;
+            default -> java.awt.event.KeyEvent.KEY_LOCATION_STANDARD;
+        };
     }
 
     private HBox createStatusBar() {
@@ -257,10 +347,6 @@ public class RdpPane extends BorderPane {
             logger.info("RDP显示组件: " + displayComponent.getClass().getSimpleName()
                     + " size=" + displayComponent.getSize()
                     + " prefSize=" + displayComponent.getPreferredSize());
-            // 启用本地输入法；Input会把已提交文本转换为RDP Unicode键盘事件，
-            // 组合中的拼音仍只在本地输入法中处理，不会提前发送到远端。
-            displayComponent.enableInputMethods(true);
-
 			// SwingNode maps AWT custom cursors to Cursor.DEFAULT. RDP pointer
 			// shapes (including window-edge resize arrows) are all custom images,
 			// so pass their source image directly to JavaFX instead.
@@ -485,6 +571,7 @@ public class RdpPane extends BorderPane {
      * 断开连接
      */
     public void disconnect() {
+        windowsImeController.restore();
         // 断开前先退出全屏，把组件还原到tab中，避免全屏窗口残留
         if (fullScreenStage != null) {
             exitFullScreen();
@@ -524,6 +611,9 @@ public class RdpPane extends BorderPane {
     public void requestRdpFocus() {
         if (swingNode != null) {
             swingNode.requestFocus();
+            // requestFocus() may be called while the SwingNode is already the
+            // JavaFX focus owner, in which case focusedProperty does not fire.
+            windowsImeController.disableForFocusedWindow();
         }
         JComponent display = desktopDisplay;
         if (display != null) {

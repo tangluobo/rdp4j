@@ -16,8 +16,6 @@ import java.awt.KeyboardFocusManager;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.awt.event.InputEvent;
-import java.awt.event.InputMethodEvent;
-import java.awt.event.InputMethodListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -25,7 +23,6 @@ import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
 import java.awt.event.MouseWheelEvent;
 import java.awt.event.MouseWheelListener;
-import java.text.AttributedCharacterIterator;
 import java.util.Collections;
 import java.util.Vector;
 
@@ -55,8 +52,6 @@ public class Input {
 	// rdesktop 1.2.0
 	protected static final int MOUSE_FLAG_DOWN = 0x8000;
 	protected static final int MOUSE_FLAG_MOVE = 0x0800;
-	/** TS_UNICODE_KEYBOARD_EVENT (MS-RDPBCGR): UTF-16 code unit in param1. */
-	protected static final int RDP_INPUT_UNICODE = 5;
 	protected static final int RDP_INPUT_MOUSE = 0x8001;
 	protected static final int RDP_INPUT_SCANCODE = 4;
 	protected static final int RDP_INPUT_SYNCHRONIZE = 0;
@@ -83,7 +78,6 @@ public class Input {
 	private boolean remoteShiftStateKnown = false;
 	KeyCode keys = null;
 	private FocusAdapter focusListener;
-	private InputMethodListener inputMethodListener;
 	private RdesktopKeyAdapter keyListener;
 	private RdesktopMouseAdapter mouseListener;
 	private RdesktopMouseMotionAdapter mouseMotionListener;
@@ -133,42 +127,13 @@ public class Input {
 			};
 			((java.awt.Component) canvas.getDisplay()).addFocusListener(focusListener);
 		}
-		if (inputMethodListener == null && canvas.getDisplay() instanceof java.awt.Component) {
-			inputMethodListener = new InputMethodListener() {
-				@Override
-				public void inputMethodTextChanged(InputMethodEvent e) {
-					AttributedCharacterIterator text = e.getText();
-					int committed = e.getCommittedCharacterCount();
-					if (text == null || committed <= 0) {
-						return;
-					}
-					char ch = text.first();
-					for (int i = 0; i < committed && ch != AttributedCharacterIterator.DONE; i++) {
-						sendUnicodeCharacter(ch);
-						ch = text.next();
-					}
-					e.consume();
-				}
-
-				@Override
-				public void caretPositionChanged(InputMethodEvent e) {
-					// RDP画布没有本地文本插入光标，无需处理输入法候选位置变化。
-				}
-			};
-			java.awt.Component component = (java.awt.Component) canvas.getDisplay();
-			component.enableInputMethods(true);
-			component.addInputMethodListener(inputMethodListener);
+		if (canvas.getDisplay() instanceof java.awt.Component component) {
+			// RDP必须把物理按键交给远端键盘布局/输入法处理。
+			// 若在此启用AWT输入法，本地IME会先吞掉按键，并产生
+			// InputMethodEvent，导致输入内容取决于本地而不是远端IME。
+			component.enableInputMethods(false);
 		}
 		canvas.getDisplay().addMouseWheelListener(new RdesktopMouseWheelAdapter());
-	}
-
-	/** 发送一个UTF-16代码单元；补充字符会以代理项对依次发送。 */
-	private void sendUnicodeCharacter(char ch) {
-		if (ch == AttributedCharacterIterator.DONE || Character.isISOControl(ch) || state.getRdp() == null) {
-			return;
-		}
-		state.getRdp().sendInput(getTime(), RDP_INPUT_UNICODE, RDP_KEYPRESS, ch, 0);
-		state.getRdp().sendInput(getTime(), RDP_INPUT_UNICODE, KBD_FLAG_UP, ch, 0);
 	}
 
 	/**
@@ -460,9 +425,26 @@ public class Input {
 			((java.awt.Component) canvas.getDisplay()).removeFocusListener(focusListener);
 			focusListener = null;
 		}
-		if (inputMethodListener != null && canvas.getDisplay() instanceof java.awt.Component) {
-			((java.awt.Component) canvas.getDisplay()).removeInputMethodListener(inputMethodListener);
-			inputMethodListener = null;
+	}
+
+	/**
+	 * Dispatch a keyboard event supplied by an embedding toolkit.
+	 *
+	 * <p>{@code SwingNode} normally translates JavaFX key events to AWT, but on
+	 * Windows it drops some press/release events while a local IME is active.
+	 * The JavaFX host uses this entry point to bypass that character-dependent
+	 * translation and retain the normal RDP shortcut, modifier and keymap logic.</p>
+	 *
+	 * @param e AWT-compatible press or release event
+	 */
+	public void dispatchKeyEvent(KeyEvent e) {
+		if (keyListener == null || e == null) {
+			return;
+		}
+		if (e.getID() == KeyEvent.KEY_PRESSED) {
+			keyListener.keyPressed(e);
+		} else if (e.getID() == KeyEvent.KEY_RELEASED) {
+			keyListener.keyReleased(e);
 		}
 	}
 
@@ -779,13 +761,6 @@ public class Input {
 			if (logger.isDebugEnabled())
 				logger.debug("TYPED keychar='" + e.getKeyChar() + "' keycode=0x" + Integer.toHexString(e.getKeyCode()) + " char='"
 						+ ((char) e.getKeyCode()) + "'");
-			// 输入法或本地键盘直接产生的非ASCII字符没有可靠scancode映射，
-			// 走RDP Unicode事件；普通英文仍沿用原键盘映射，保留快捷键语义。
-			if (e.getKeyChar() > 0x7f && e.getKeyChar() != KeyEvent.CHAR_UNDEFINED) {
-				sendUnicodeCharacter(e.getKeyChar());
-				e.consume();
-				return;
-			}
 			if (state.getRdp() != null) {
 				if (!handleSpecialKeys(time, e, true))
 					sendKeyPresses(state.getOptions().getKeymap().getKeyStrokes(e));
