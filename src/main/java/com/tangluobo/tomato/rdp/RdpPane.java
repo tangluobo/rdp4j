@@ -622,6 +622,7 @@ public class RdpPane extends BorderPane {
         exitBar = new HBox(8);
         exitBar.setAlignment(Pos.CENTER);
         exitBar.setPrefWidth(520);
+        exitBar.setMinWidth(175);
         exitBar.setMaxWidth(760);
         exitBar.setMinHeight(Region.USE_PREF_SIZE);
         exitBar.setMaxHeight(Region.USE_PREF_SIZE);
@@ -635,11 +636,11 @@ public class RdpPane extends BorderPane {
         pinBtn.setFocusTraversable(false);
         pinBtn.setMinWidth(Region.USE_PREF_SIZE);
         pinBtn.setGraphic(createPinIcon());
-        pinBtn.setTooltip(new Tooltip("固定控制条"));
+        pinBtn.setTooltip(createControlTooltip("固定控制条"));
         pinBtn.setStyle(controlBarButtonStyle(false));
         pinBtn.selectedProperty().addListener((obs, oldValue, pinned) -> {
             exitBarPinned = pinned;
-            pinBtn.setTooltip(new Tooltip(pinned ? "取消固定控制条" : "固定控制条"));
+            pinBtn.setTooltip(createControlTooltip(pinned ? "取消固定控制条" : "固定控制条"));
             pinBtn.setStyle(controlBarButtonStyle(pinned));
             if (pinned) {
                 if (hideExitBarTimer != null) hideExitBarTimer.stop();
@@ -653,7 +654,7 @@ public class RdpPane extends BorderPane {
         qualityBtn.setFocusTraversable(false);
         qualityBtn.setMinWidth(Region.USE_PREF_SIZE);
         qualityBtn.setGraphic(createSignalIcon());
-        qualityBtn.setTooltip(new Tooltip("查看连接质量"));
+        qualityBtn.setTooltip(createControlTooltip("查看连接质量"));
         qualityBtn.setStyle(controlBarButtonStyle(false));
         qualityBtn.setOnAction(e -> showConnectionQuality());
 
@@ -664,12 +665,32 @@ public class RdpPane extends BorderPane {
         titleLabel.setStyle("-fx-text-fill: white; -fx-font-size: 14px;");
         HBox.setHgrow(titleLabel, Priority.ALWAYS);
 
-        Button exitBtn = new Button("退出全屏");
-        exitBtn.setFocusTraversable(false);
-        exitBtn.setMinWidth(Region.USE_PREF_SIZE);
-        exitBtn.setStyle(controlBarButtonStyle(false));
-        exitBtn.setOnAction(e -> exitFullScreen());
-        exitBar.getChildren().addAll(pinBtn, qualityBtn, titleLabel, exitBtn);
+        Button minimizeBtn = createWindowControlButton(
+                "M6 13.5h12v-1H6v1z", "最小化", false);
+        minimizeBtn.setOnAction(e -> minimizeFullScreen());
+
+        Button maximizeBtn = createWindowControlButton(
+                "M7 3h12v1H7z M18 3h1v12h-1z M7 3h1v3h-1z M16 15h3v1h-3z "
+                        + "M4 6h12v12H4V6zm1 1v10h10V7H5z",
+                "退出全屏", false);
+        maximizeBtn.setOnAction(e -> exitFullScreen());
+
+        Button closeBtn = createWindowControlButton(
+                "M19 6.5L18.5 6 12 12.5 5.5 6 5 6.5 11.5 13 5 19.5 5.5 20 12 13.5 18.5 20 19 19.5 12.5 13 19 6.5z",
+                "关闭远程桌面", true);
+        closeBtn.setOnAction(e -> closeRemoteDesktop());
+
+        Region leftResizeGrip = createControlBarResizeGrip();
+        Region rightResizeGrip = createControlBarResizeGrip();
+        exitBar.getChildren().addAll(leftResizeGrip, pinBtn, qualityBtn, titleLabel,
+                minimizeBtn, maximizeBtn, closeBtn, rightResizeGrip);
+        installControlBarAdjustment(titleLabel, leftResizeGrip, rightResizeGrip);
+        exitBar.widthProperty().addListener((obs, oldWidth, newWidth) -> {
+            double width = newWidth.doubleValue();
+            setControlVisible(titleLabel, width >= 380);
+            setControlVisible(minimizeBtn, width >= 310);
+            setControlVisible(maximizeBtn, width >= 260);
+        });
         exitBar.setVisible(true);
         exitBar.setTranslateY(0);
         StackPane.setAlignment(exitBar, Pos.TOP_CENTER);
@@ -745,6 +766,11 @@ public class RdpPane extends BorderPane {
                 return;
             }
             stage.setFullScreen(true);
+            stage.requestFocus();
+            if (fullScreenRoot != null) {
+                fullScreenRoot.applyCss();
+                fullScreenRoot.layout();
+            }
             fullScreenTransitioning = false;
             if (!exitBarPinned && hideExitBarTimer != null) {
                 hideExitBarTimer.playFromStart();
@@ -827,16 +853,38 @@ public class RdpPane extends BorderPane {
             resizeDesktopViewport();
             requestRdpFocus();
 
-            // 再等一次布局稳定后同步提交整张远程桌面，覆盖增量脏区遗漏。
-            PauseTransition settle = new PauseTransition(Duration.millis(120));
-            settle.setOnFinished(e -> {
-                if (generation == sceneRefreshGeneration) {
-                    resizeDesktopViewport();
-                    requestRdpFocus();
-                }
-            });
-            settle.play();
+            // 全屏Stage在Windows上通常需要多个脉冲才会完成原生窗口和SwingNode
+            // 表面的绑定。分两次主动布局、聚焦和整幅提交，避免必须点击一下才出画面。
+            scheduleSceneSettledRefresh(generation, 120);
+            scheduleSceneSettledRefresh(generation, 350);
         });
+    }
+
+    private void scheduleSceneSettledRefresh(long generation, double delayMillis) {
+        PauseTransition settle = new PauseTransition(Duration.millis(delayMillis));
+        settle.setOnFinished(e -> {
+            if (generation != sceneRefreshGeneration || swingNode == null) {
+                return;
+            }
+            if (fullScreenRoot != null) {
+                fullScreenRoot.applyCss();
+                fullScreenRoot.layout();
+            } else {
+                applyCss();
+                layout();
+            }
+            if (swingNode.getParent() != null) {
+                swingNode.getParent().requestLayout();
+            }
+            resizeDesktopViewport();
+            JScrollPane scrollPane = desktopScrollPane;
+            JComponent display = desktopDisplay;
+            if (scrollPane != null && display != null) {
+                SwingUtilities.invokeLater(() -> repaintDesktopSynchronously(scrollPane, display));
+            }
+            requestRdpFocus();
+        });
+        settle.play();
     }
 
     private void showExitBar() {
@@ -891,6 +939,110 @@ public class RdpPane extends BorderPane {
         icon.setContent("M2 14H4V18H2ZM6 11H8V18H6ZM10 8H12V18H10ZM14 5H16V18H14Z");
         icon.setFill(Color.WHITE);
         return icon;
+    }
+
+    private Button createWindowControlButton(String path, String tooltip, boolean closeButton) {
+        SVGPath icon = new SVGPath();
+        icon.setContent(path);
+        icon.setFill(Color.WHITE);
+        Button button = new Button();
+        button.setGraphic(icon);
+        button.setFocusTraversable(false);
+        button.setTooltip(createControlTooltip(tooltip));
+        String normal = "-fx-background-color: transparent; -fx-background-radius: 0;"
+                + " -fx-pref-width: 30px; -fx-pref-height: 26px; -fx-padding: 0; -fx-cursor: hand;";
+        String hover = "-fx-background-color: " + (closeButton ? "#c42b1c" : "rgba(255,255,255,0.22)") + ";"
+                + " -fx-background-radius: 0; -fx-pref-width: 30px; -fx-pref-height: 26px;"
+                + " -fx-padding: 0; -fx-cursor: hand;";
+        button.setStyle(normal);
+        button.setOnMouseEntered(e -> button.setStyle(hover));
+        button.setOnMouseExited(e -> button.setStyle(normal));
+        return button;
+    }
+
+    private Region createControlBarResizeGrip() {
+        Region grip = new Region();
+        grip.setMinWidth(5);
+        grip.setPrefWidth(5);
+        grip.setMaxWidth(5);
+        grip.setMaxHeight(Double.MAX_VALUE);
+        grip.setCursor(Cursor.H_RESIZE);
+        return grip;
+    }
+
+    private void installControlBarAdjustment(Label dragArea, Region leftGrip, Region rightGrip) {
+        final double[] moveStart = new double[2];
+        dragArea.setCursor(Cursor.MOVE);
+        dragArea.setOnMousePressed(e -> {
+            moveStart[0] = e.getScreenX();
+            moveStart[1] = exitBar.getTranslateX();
+            e.consume();
+        });
+        dragArea.setOnMouseDragged(e -> {
+            double requested = moveStart[1] + e.getScreenX() - moveStart[0];
+            exitBar.setTranslateX(clampControlBarX(requested, exitBar.getWidth()));
+            e.consume();
+        });
+
+        installResizeGrip(leftGrip, true);
+        installResizeGrip(rightGrip, false);
+    }
+
+    private void installResizeGrip(Region grip, boolean leftEdge) {
+        final double[] start = new double[3];
+        grip.setOnMousePressed(e -> {
+            start[0] = e.getScreenX();
+            start[1] = exitBar.getWidth();
+            start[2] = exitBar.getTranslateX();
+            e.consume();
+        });
+        grip.setOnMouseDragged(e -> {
+            double delta = e.getScreenX() - start[0];
+            double requestedWidth = leftEdge ? start[1] - delta : start[1] + delta;
+            double width = Math.max(175, Math.min(760, requestedWidth));
+            // StackPane以中心定位；调整单侧边缘时同步移动中心，保持另一侧不动。
+            double usedDelta = leftEdge ? start[1] - width : width - start[1];
+            double requestedX = start[2] + (leftEdge ? usedDelta / 2 : usedDelta / 2);
+            exitBar.setPrefWidth(width);
+            exitBar.setTranslateX(clampControlBarX(requestedX, width));
+            e.consume();
+        });
+    }
+
+    private double clampControlBarX(double translateX, double barWidth) {
+        if (fullScreenRoot == null) {
+            return translateX;
+        }
+        double available = Math.max(0, (fullScreenRoot.getWidth() - barWidth) / 2);
+        return Math.max(-available, Math.min(available, translateX));
+    }
+
+    private void setControlVisible(Region control, boolean visible) {
+        control.setVisible(visible);
+        control.setManaged(visible);
+    }
+
+    private Tooltip createControlTooltip(String text) {
+        Tooltip tooltip = new Tooltip(text);
+        tooltip.setShowDelay(Duration.millis(200));
+        tooltip.setHideDelay(Duration.millis(100));
+        tooltip.setShowDuration(Duration.seconds(8));
+        return tooltip;
+    }
+
+    private void minimizeFullScreen() {
+        // 全屏Stage最小化时JavaFX会先退出全屏；直接还原到主窗口中的会话标签，
+        // 与应用窗口的最小化/还原体验保持一致且不会断开连接。
+        exitFullScreen();
+    }
+
+    private void closeRemoteDesktop() {
+        Tab tab = ownerTab;
+        exitFullScreen();
+        disconnect();
+        if (tab != null && tab.getTabPane() != null) {
+            tab.getTabPane().getTabs().remove(tab);
+        }
     }
 
     private void showConnectionQuality() {
