@@ -1,17 +1,25 @@
 package com.tangluobo.tomato.rdp;
 
 import java.awt.AlphaComposite;
+import java.awt.Dimension;
 import java.awt.Graphics2D;
+import java.awt.Graphics;
+import java.awt.GridBagLayout;
+import java.awt.Rectangle;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.nio.IntBuffer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.swing.JLabel;
+import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JScrollBar;
 import javax.swing.SwingUtilities;
+import javax.swing.plaf.basic.BasicScrollBarUI;
 
 import com.tangluobo.tomato.rdp.graphics.RdpCursor;
 import com.tangluobo.tomato.rdp.graphics.WrappedImage;
@@ -65,6 +73,7 @@ public class RdpPane extends BorderPane {
     private SwingNode swingNode;
     private volatile JScrollPane desktopScrollPane;
     private volatile JComponent desktopDisplay;
+    private volatile boolean windowScrollBarsSuppressed;
 
     // 状态栏组件
     private HBox statusBar;
@@ -260,12 +269,22 @@ public class RdpPane extends BorderPane {
             // 在EDT上用JScrollPane包装显示组件（WrappedImage实现了Scrollable）
             SwingUtilities.invokeLater(() -> {
                 displayComponent.setSize(displayComponent.getPreferredSize());
-                JScrollPane scrollPane = new JScrollPane(displayComponent);
+                // 用GridBag居中宿主承载远程画布：窗口大于远程分辨率时画面保持
+                // 水平、垂直居中；窗口缩小时宿主仍以画布首选尺寸参与滚动计算。
+                JPanel canvasHost = new JPanel(new GridBagLayout());
+                canvasHost.setBackground(java.awt.Color.BLACK);
+                canvasHost.add(displayComponent);
+                JScrollPane scrollPane = new JScrollPane(canvasHost);
                 scrollPane.setBackground(java.awt.Color.BLACK);
                 scrollPane.getViewport().setBackground(java.awt.Color.BLACK);
                 // 去掉Metal LAF默认的四边线边框（全屏时会呈现为屏幕四周的白线）
                 scrollPane.setBorder(null);
                 scrollPane.getViewport().setBorder(null);
+                applyWindows10ScrollBars(scrollPane);
+                if (windowScrollBarsSuppressed) {
+                    scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
+                    scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+                }
                 scrollPane.setDoubleBuffered(true);
                 desktopDisplay = displayComponent;
                 desktopScrollPane = scrollPane;
@@ -1034,9 +1053,17 @@ public class RdpPane extends BorderPane {
     }
 
     private void minimizeFullScreen() {
-        // 全屏Stage最小化时JavaFX会先退出全屏；直接还原到主窗口中的会话标签，
-        // 与应用窗口的最小化/还原体验保持一致且不会断开连接。
+        Tab tab = ownerTab;
         exitFullScreen();
+        // RDP视图还原到其所属窗口后再最小化该窗口；直接最小化全屏Stage会被
+        // JavaFX当作“退出全屏”，表现为仅还原窗口而没有真正最小化。
+        Platform.runLater(() -> {
+            if (tab != null && tab.getTabPane() != null
+                    && tab.getTabPane().getScene() != null
+                    && tab.getTabPane().getScene().getWindow() instanceof Stage stage) {
+                stage.setIconified(true);
+            }
+        });
     }
 
     private void closeRemoteDesktop() {
@@ -1114,6 +1141,107 @@ public class RdpPane extends BorderPane {
             scrollPane.repaint();
         });
         scheduleViewportRefresh();
+    }
+
+    private void applyWindows10ScrollBars(JScrollPane scrollPane) {
+        JScrollBar vertical = scrollPane.getVerticalScrollBar();
+        vertical.setUI(new Windows10ScrollBarUI());
+        vertical.setPreferredSize(new Dimension(14, 0));
+        vertical.setUnitIncrement(24);
+
+        JScrollBar horizontal = scrollPane.getHorizontalScrollBar();
+        horizontal.setUI(new Windows10ScrollBarUI());
+        horizontal.setPreferredSize(new Dimension(0, 14));
+        horizontal.setUnitIncrement(24);
+
+        JPanel corner = new JPanel();
+        corner.setBackground(new java.awt.Color(240, 240, 240));
+        scrollPane.setCorner(JScrollPane.LOWER_RIGHT_CORNER, corner);
+    }
+
+    /** 首次打开独立窗口时使用：客户区校准完成前不让滚动条反向挤压画布。 */
+    public void suppressInitialWindowScrollBars() {
+        windowScrollBarsSuppressed = true;
+        JScrollPane scrollPane = desktopScrollPane;
+        if (scrollPane != null) {
+            SwingUtilities.invokeLater(() -> {
+                scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
+                scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+            });
+        }
+    }
+
+    /** 用户首次手动调整窗口后恢复按需滚动条。 */
+    public void enableWindowScrollBars() {
+        if (!windowScrollBarsSuppressed) {
+            return;
+        }
+        windowScrollBarsSuppressed = false;
+        JScrollPane scrollPane = desktopScrollPane;
+        if (scrollPane != null && fullScreenStage == null) {
+            SwingUtilities.invokeLater(() -> {
+                scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+                scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+                scrollPane.revalidate();
+                scrollPane.repaint();
+            });
+        }
+    }
+
+    /** Win10风格：浅灰轨道、窄灰色滑块、悬停加深，不显示厚重的Metal箭头按钮。 */
+    private static final class Windows10ScrollBarUI extends BasicScrollBarUI {
+        private static final java.awt.Color TRACK = new java.awt.Color(240, 240, 240);
+        private static final java.awt.Color THUMB = new java.awt.Color(193, 193, 193);
+        private static final java.awt.Color THUMB_HOVER = new java.awt.Color(168, 168, 168);
+
+        @Override
+        protected void configureScrollBarColors() {
+            trackColor = TRACK;
+            thumbColor = THUMB;
+        }
+
+        @Override
+        protected JButton createDecreaseButton(int orientation) {
+            return createZeroButton();
+        }
+
+        @Override
+        protected JButton createIncreaseButton(int orientation) {
+            return createZeroButton();
+        }
+
+        private JButton createZeroButton() {
+            JButton button = new JButton();
+            Dimension zero = new Dimension(0, 0);
+            button.setMinimumSize(zero);
+            button.setPreferredSize(zero);
+            button.setMaximumSize(zero);
+            return button;
+        }
+
+        @Override
+        protected void paintTrack(Graphics graphics, JComponent component, Rectangle bounds) {
+            graphics.setColor(TRACK);
+            graphics.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+        }
+
+        @Override
+        protected void paintThumb(Graphics graphics, JComponent component, Rectangle bounds) {
+            if (bounds.isEmpty() || !scrollbar.isEnabled()) {
+                return;
+            }
+            Graphics2D g2 = (Graphics2D) graphics.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setColor(isThumbRollover() ? THUMB_HOVER : THUMB);
+            if (scrollbar.getOrientation() == JScrollBar.VERTICAL) {
+                g2.fillRoundRect(bounds.x + 3, bounds.y + 1,
+                        Math.max(4, bounds.width - 6), Math.max(4, bounds.height - 2), 4, 4);
+            } else {
+                g2.fillRoundRect(bounds.x + 1, bounds.y + 3,
+                        Math.max(4, bounds.width - 2), Math.max(4, bounds.height - 6), 4, 4);
+            }
+            g2.dispose();
+        }
     }
 
     /**
