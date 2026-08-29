@@ -1104,12 +1104,13 @@ public class RdpPane extends BorderPane {
             return;
         }
         if (fullScreenStage != null) {
-            // 全屏模式：视口与远程桌面同尺寸并隐藏滚动条（画面不裁剪），
-            // 通过swingNode上的Scale变换等比缩放铺满整个屏幕
+            // 全屏模式：滚动容器使用实际屏幕客户区尺寸，不再把SwingNode整体
+            // 二次缩放。远程画面较小时由GridBag宿主水平、垂直居中；等大时完整贴合。
             SwingUtilities.invokeLater(() -> {
                 java.awt.Dimension canvasSize = display.getPreferredSize();
-                scrollPane.setPreferredSize(canvasSize);
-                scrollPane.setSize(canvasSize);
+                java.awt.Dimension viewportSize = new java.awt.Dimension(width, height);
+                scrollPane.setPreferredSize(viewportSize);
+                scrollPane.setSize(viewportSize);
                 scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
                 scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
                 scrollPane.doLayout();
@@ -1123,9 +1124,9 @@ public class RdpPane extends BorderPane {
                 // 区域不会被自动调度重绘（SwingNode内非标准布局路径），表现为黑方块、
                 // 鼠标划过才逐块补画。paintImmediately同步整幅绘制，彻底消除黑块。
                 display.paintImmediately(0, 0, canvasSize.width, canvasSize.height);
-                scrollPane.paintImmediately(0, 0, canvasSize.width, canvasSize.height);
+                scrollPane.paintImmediately(0, 0, viewportSize.width, viewportSize.height);
             });
-            applyFullScreenScale();
+            swingNode.getTransforms().clear();
             return;
         }
         SwingUtilities.invokeLater(() -> {
