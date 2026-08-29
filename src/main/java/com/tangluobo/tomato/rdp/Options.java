@@ -49,9 +49,12 @@ public class Options {
 	private boolean polygonEllipseOrders = false;
 	private boolean precacheBitmaps = false;
 	private boolean rdp5 = true;
+	// Keep full-window dragging enabled. Advertising
+	// PERF_DISABLE_FULLWINDOW_DRAG makes Windows draw only a thick black outline
+	// while a remote window is moved or resized. mstsc keeps the actual window
+	// visible on suitable connections, which also avoids that distracting frame.
 	private int rdp5PerformanceFlags = Rdp.PERF_DISABLE_CURSOR_SHADOW | Rdp.PERF_DISABLE_CURSORSETTINGS
-			| Rdp.PERF_DISABLE_FULLWINDOW_DRAG | Rdp.PERF_DISABLE_MENU_ANIMATIONS | Rdp.PERF_DISABLE_THEMING
-			| Rdp.PERF_DISABLE_WALLPAPER;
+			| Rdp.PERF_DISABLE_MENU_ANIMATIONS | Rdp.PERF_DISABLE_THEMING | Rdp.PERF_DISABLE_WALLPAPER;
 	private boolean remapHash = true;
 	private boolean saveLicence = false;
 	private boolean sendmotion = true;
