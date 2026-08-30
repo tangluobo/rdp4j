@@ -28,6 +28,11 @@ public class SocketIO implements IO {
 	}
 
 	@Override
+	public void setLowLatency(boolean lowLatency) throws IOException {
+		socket.setTcpNoDelay(lowLatency);
+	}
+
+	@Override
 	public InputStream getInputStream() throws IOException {
 		return socket.getInputStream();
 	}

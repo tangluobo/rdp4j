@@ -73,6 +73,7 @@ public class Transport implements Layer<ISO> {
 
 	public void connect(IO io) throws IOException {
 		this.io = io;
+		io.setLowLatency(state.getOptions().isLowLatency());
 		this.in = new DataInputStream(new BufferedInputStream(io.getInputStream()));
 		this.out = new DataOutputStream(new BufferedOutputStream(io.getOutputStream()));
 	}

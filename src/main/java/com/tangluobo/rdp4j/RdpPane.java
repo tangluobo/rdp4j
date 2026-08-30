@@ -411,6 +411,11 @@ public class RdpPane extends BorderPane {
         exitBar = null;
         exitBarPinned = false;
         applyFullScreenPresentation(false);
+        // An independent window can suppress its bars while its initial size
+        // is fitted to a windowed desktop. Once a full-screen desktop returns
+        // to that smaller window, the remote raster must stay at native size
+        // and both scroll bars must be available as needed.
+        enableWindowScrollBars();
         setBottom(statusBar);
         setStyle(null);
         if (oldRoot != null) {

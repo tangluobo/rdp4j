@@ -183,7 +183,14 @@ public final class FxRdpInput implements RdpInput {
     }
 
     private void sendMouse(int flags, int x, int y) {
-        display.recordLocalPointerPosition(x, y);
+        if ((flags & MOUSE_FLAG_MOVE) != 0) {
+            display.recordLocalPointerPosition(x, y);
+        } else {
+            // A click can repaint a menu or selection around the pointer. Do
+            // not let stale movement probes classify that UI repaint as a
+            // software cursor and hide the real JavaFX cursor.
+            display.recordLocalPointerButtonPosition(x, y);
+        }
         if (state.getRdp() == null) {
             return;
         }

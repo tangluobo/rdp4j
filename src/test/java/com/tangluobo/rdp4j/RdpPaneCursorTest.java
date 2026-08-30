@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
-import java.awt.Point;
 
 import org.junit.jupiter.api.Test;
 
@@ -79,29 +78,18 @@ class RdpPaneCursorTest {
     }
 
     @Test
-    void recognizesAClientCursorAlreadyDrawnIntoRemoteFrame() {
-        BufferedImage cursor = new BufferedImage(4, 4, BufferedImage.TYPE_INT_ARGB);
-        cursor.setRGB(0, 0, 0xff000000);
-        cursor.setRGB(1, 0, 0xffffffff);
-        cursor.setRGB(1, 1, 0xff000000);
-        cursor.setRGB(2, 1, 0xffffffff);
-        cursor.setRGB(2, 2, 0xff000000);
-        cursor.setRGB(3, 2, 0xffffffff);
-        cursor.setRGB(3, 3, 0xff000000);
-        cursor.setRGB(0, 3, 0xffffffff);
+    void recognizesCursorSizedChangesAtBothOldAndNewPointerPositions() {
+        assertTrue(FxRdpDisplay.resemblesSoftwareCursorMovement(80, 2401, 95, 2401));
+        assertFalse(FxRdpDisplay.resemblesSoftwareCursorMovement(0, 2401, 95, 2401));
+        assertFalse(FxRdpDisplay.resemblesSoftwareCursorMovement(80, 2401, 1800, 2401),
+                "large video or control repaints must not be treated as a software cursor");
+    }
 
-        BufferedImage frame = new BufferedImage(80, 60, BufferedImage.TYPE_INT_ARGB);
-        int pointerX = 30;
-        int pointerY = 20;
-        Point hotspot = new Point(1, 1);
-        int drawX = pointerX - hotspot.x + 3;
-        int drawY = pointerY - hotspot.y - 2;
-        frame.getGraphics().drawImage(cursor, drawX, drawY, null);
-
-        assertEquals(1.0, FxRdpDisplay.cursorMatchScore(
-                cursor, hotspot, frame, pointerX, pointerY, 4));
-        assertTrue(FxRdpDisplay.cursorMatchScore(
-                cursor, hotspot, frame, 60, 40, 4) < 0.7);
+    @Test
+    void limitsFrameCursorInferenceToLegacyVmCursorSize() {
+        assertTrue(FxRdpDisplay.isLegacyVmSoftwareCursorCandidate(24, 24));
+        assertFalse(FxRdpDisplay.isLegacyVmSoftwareCursorCandidate(32, 32),
+                "Windows protocol cursors must remain visible during context-menu repaints");
     }
 
 }

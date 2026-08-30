@@ -214,6 +214,12 @@ public class RdesktopCanvas {
 				if (andStep * nHeight > andMask.length)
 					return null;
 			}
+			// Some Windows/virtualization servers send 32-bpp pointers as legacy
+			// XRGB data: the fourth byte is reserved and is zero for every pixel.
+			// In that form transparency comes from the 1-bpp AND mask. Only treat
+			// the fourth byte as alpha when the pointer actually contains alpha.
+			boolean legacy32BitPointer = xorBpp == 32 && andMask != null
+					&& !hasNonZero32BitAlpha(xorMask, xorStep, nWidth, nHeight);
 			if (xorBpp == 8) {
 				bim = new BufferedImage(nWidth, nHeight, BufferedImage.TYPE_BYTE_INDEXED, colormap);
 			} else {
@@ -237,7 +243,8 @@ public class RdesktopCanvas {
 						int blue = xorBits[xorBitsIdx] & 0xff;
 						int green = xorBits[xorBitsIdx + 1] & 0xff;
 						int red = xorBits[xorBitsIdx + 2] & 0xff;
-						int alpha = xorBpp == 32 ? xorBits[xorBitsIdx + 3] & 0xff : 0xff;
+						int alpha = xorBpp == 32 && !legacy32BitPointer
+								? xorBits[xorBitsIdx + 3] & 0xff : 0xff;
 						xorPixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
 					} else {
 						throw new UnsupportedOperationException("TODO 16 bit cursor colour depth is not supported.");
@@ -266,6 +273,17 @@ public class RdesktopCanvas {
 			return null;
 		}
 		return createCustomCursor(bim, new Point(nXDst, nYDst), "", cache_idx);
+	}
+
+	private static boolean hasNonZero32BitAlpha(byte[] xorMask, int xorStep, int width, int height) {
+		for (int row = 0; row < height; row++) {
+			int rowOffset = row * xorStep;
+			for (int column = 0; column < width; column++) {
+				if ((xorMask[rowOffset + column * 4 + 3] & 0xff) != 0)
+					return true;
+			}
+		}
+		return false;
 	}
 
 	/** Return a transparent cursor for the RDP system-pointer hidden state. */
@@ -332,7 +350,7 @@ public class RdesktopCanvas {
 	 * @throws RdesktopException on error
 	 */
 	public void displayImage(int[] data, int w, int h, int x, int y, int cx, int cy) throws RdesktopException {
-		backstore.setRGB(x, y, cx, cy, data, 0, w);
+		displayImageRegion(data, 0, w, x, y, cx, cy);
 		/*
 		 * ********* Useful test for identifying image boundaries ************
 		 */
@@ -341,6 +359,15 @@ public class RdesktopCanvas {
 		// g.setColor(Color.RED);
 		// g.drawRect(x,y,cx,cy);
 		// g.dispose();
+	}
+
+	/**
+	 * Draw a rectangular view of a larger source raster without first copying it
+	 * into a tightly packed temporary array.
+	 */
+	public void displayImageRegion(int[] data, int offset, int scanWidth,
+			int x, int y, int width, int height) throws RdesktopException {
+		backstore.setRGB(x, y, width, height, data, offset, scanWidth);
 	}
 
 	/**

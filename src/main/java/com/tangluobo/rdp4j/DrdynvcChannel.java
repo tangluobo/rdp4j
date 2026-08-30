@@ -526,6 +526,7 @@ final class DrdynvcChannel extends VChannel {
             default:
                 throw new RdesktopException("不支持的WIRE_TO_SURFACE_1位图编码: " + codecId);
         }
+        surface.markDirty(left, top, width, height);
         dirtySurfaces.add(surfaceId);
     }
 
@@ -653,6 +654,9 @@ final class DrdynvcChannel extends VChannel {
         surface.outputX = (int) u32(pdu, offset + 12);
         surface.outputY = (int) u32(pdu, offset + 16);
         surface.mapped = true;
+        if (surface.hasDirtyRegion()) {
+            dirtySurfaces.add(id);
+        }
         logger.info("rdpgfx: 映射图面 id=" + id + " -> " + surface.outputX + "," + surface.outputY);
     }
 
@@ -712,33 +716,44 @@ final class DrdynvcChannel extends VChannel {
             return false;
         }
         boolean rendered = false;
-        for (Integer id : dirtySurfaces) {
+        Set<Integer> pendingSurfaces = new LinkedHashSet<>(dirtySurfaces);
+        dirtySurfaces.clear();
+        for (Integer id : pendingSurfaces) {
             GfxSurface surface = surfaces.get(id);
-            if (surface == null || !surface.mapped) continue;
-            int sourceX = Math.max(0, -surface.outputX);
-            int sourceY = Math.max(0, -surface.outputY);
-            int destinationX = Math.max(0, surface.outputX);
-            int destinationY = Math.max(0, surface.outputY);
-            int width = Math.min(surface.width - sourceX, state.getWidth() - destinationX);
-            int height = Math.min(surface.height - sourceY, state.getHeight() - destinationY);
+            if (surface == null) continue;
+            if (!surface.mapped) {
+                dirtySurfaces.add(id);
+                continue;
+            }
+            DirtyRectangle dirty = surface.consumeDirtyRegion();
+            if (dirty == null) continue;
+
+            int sourceX = dirty.left;
+            int sourceY = dirty.top;
+            long mappedLeft = (long) surface.outputX + sourceX;
+            long mappedTop = (long) surface.outputY + sourceY;
+            if (mappedLeft < 0) {
+                sourceX += (int) Math.min(Integer.MAX_VALUE, -mappedLeft);
+                mappedLeft = 0;
+            }
+            if (mappedTop < 0) {
+                sourceY += (int) Math.min(Integer.MAX_VALUE, -mappedTop);
+                mappedTop = 0;
+            }
+            if (mappedLeft >= state.getWidth() || mappedTop >= state.getHeight()) continue;
+
+            int destinationX = (int) mappedLeft;
+            int destinationY = (int) mappedTop;
+            int width = Math.min(dirty.right - sourceX, state.getWidth() - destinationX);
+            int height = Math.min(dirty.bottom - sourceY, state.getHeight() - destinationY);
             if (width <= 0 || height <= 0) continue;
 
-            int[] pixels;
-            if (sourceX == 0 && sourceY == 0 && width == surface.width) {
-                pixels = surface.pixels;
-            } else {
-                pixels = new int[width * height];
-                for (int row = 0; row < height; row++) {
-                    System.arraycopy(surface.pixels, (sourceY + row) * surface.width + sourceX,
-                            pixels, row * width, width);
-                }
-            }
-            state.getCanvas().displayImage(pixels, width, height,
+            state.getCanvas().displayImageRegion(surface.pixels,
+                    sourceY * surface.width + sourceX, surface.width,
                     destinationX, destinationY, width, height);
             state.getCanvas().getDisplay().repaintRemote(destinationX, destinationY, width, height);
             rendered = true;
         }
-        dirtySurfaces.clear();
         return rendered;
     }
 
@@ -838,7 +853,7 @@ final class DrdynvcChannel extends VChannel {
         }
     }
 
-    private static final class GfxSurface {
+    static final class GfxSurface {
         final int width;
         final int height;
         final int[] pixels;
@@ -846,12 +861,17 @@ final class DrdynvcChannel extends VChannel {
         int outputX;
         int outputY;
         boolean mapped;
+        int dirtyLeft;
+        int dirtyTop;
+        int dirtyRight;
+        int dirtyBottom;
 
         GfxSurface(int width, int height) {
             this.width = width;
             this.height = height;
             this.pixels = new int[width * height];
             Arrays.fill(this.pixels, 0xFF000000);
+            clearDirtyRegion();
         }
 
         void writeTile(RfxProgressiveDecoder.Tile tile) {
@@ -862,6 +882,7 @@ final class DrdynvcChannel extends VChannel {
                 System.arraycopy(tile.argb, row * 64, pixels,
                         (tile.y + row) * width + tile.x, copyWidth);
             }
+            markDirty(tile.x, tile.y, copyWidth, copyHeight);
         }
 
         void requireRectangle(int left, int top, int right, int bottom, String operation)
@@ -908,6 +929,8 @@ final class DrdynvcChannel extends VChannel {
             for (int y = clippedTop; y < clippedBottom; y++) {
                 Arrays.fill(pixels, y * width + clippedLeft, y * width + clippedRight, color);
             }
+            markDirty(clippedLeft, clippedTop,
+                    clippedRight - clippedLeft, clippedBottom - clippedTop);
             return true;
         }
 
@@ -936,7 +959,53 @@ final class DrdynvcChannel extends VChannel {
                 System.arraycopy(bitmap.pixels, (sourceY + y) * bitmap.width + sourceX,
                         pixels, (targetY + y) * width + targetX, copyWidth);
             }
+            markDirty(targetX, targetY, copyWidth, copyHeight);
             return true;
+        }
+
+        void markDirty(int x, int y, int dirtyWidth, int dirtyHeight) {
+            if (dirtyWidth <= 0 || dirtyHeight <= 0) return;
+            int left = Math.max(0, Math.min(width, x));
+            int top = Math.max(0, Math.min(height, y));
+            int right = (int) Math.max(0, Math.min((long) width, (long) x + dirtyWidth));
+            int bottom = (int) Math.max(0, Math.min((long) height, (long) y + dirtyHeight));
+            if (right <= left || bottom <= top) return;
+            dirtyLeft = Math.min(dirtyLeft, left);
+            dirtyTop = Math.min(dirtyTop, top);
+            dirtyRight = Math.max(dirtyRight, right);
+            dirtyBottom = Math.max(dirtyBottom, bottom);
+        }
+
+        boolean hasDirtyRegion() {
+            return dirtyRight > dirtyLeft && dirtyBottom > dirtyTop;
+        }
+
+        DirtyRectangle consumeDirtyRegion() {
+            if (!hasDirtyRegion()) return null;
+            DirtyRectangle dirty = new DirtyRectangle(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
+            clearDirtyRegion();
+            return dirty;
+        }
+
+        private void clearDirtyRegion() {
+            dirtyLeft = width;
+            dirtyTop = height;
+            dirtyRight = 0;
+            dirtyBottom = 0;
+        }
+    }
+
+    static final class DirtyRectangle {
+        final int left;
+        final int top;
+        final int right;
+        final int bottom;
+
+        DirtyRectangle(int left, int top, int right, int bottom) {
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
         }
     }
 

@@ -420,27 +420,28 @@ public class RdpClient {
         rdpThread.setDaemon(true);
         rdpThread.start();
 
-        // 诊断：定期报告RDP状态（持续30秒，每5秒一次）
-        java.util.Timer diagTimer = new java.util.Timer("RDP-Diag", true);
-        final int[] count = {0};
-        diagTimer.scheduleAtFixedRate(new java.util.TimerTask() {
-            @Override
-            public void run() {
-                count[0]++;
-                if (count[0] > 6 || rdpThread == null || !rdpThread.isAlive()) {
-                    cancel();
-                    return;
+        if (RdpPatch.isDiagnosticsEnabled()) {
+            // 诊断：定期报告RDP状态（持续30秒，每5秒一次）
+            java.util.Timer diagTimer = new java.util.Timer("RDP-Diag", true);
+            final int[] count = {0};
+            diagTimer.scheduleAtFixedRate(new java.util.TimerTask() {
+                @Override
+                public void run() {
+                    count[0]++;
+                    if (count[0] > 6 || rdpThread == null || !rdpThread.isAlive()) {
+                        cancel();
+                        return;
+                    }
+                    if (rdpLayer instanceof RdpPatch patch) {
+                        logger.info(String.format("[DIAG #%d] totalPDUs=%d, bitmapUpdates=%d, rdp5Packets=%d, sent=%d, recv=%d, connected=%b, active=%b, rdp5=%b, licenceIssued=%b, securityType=%s",
+                                count[0], patch.getTotalPduCount(), patch.getBitmapUpdateCount(), patch.getRdp5PacketCount(),
+                                RdpTlsFix.RdpTransport.getSendPktCount(), RdpTlsFix.RdpTransport.getRecvPktCount(),
+                                rdpLayer.isConnected(), state.isActive(), state.isRDP5(), state.isLicenceIssued(),
+                                state.getSecurityType()));
+                    }
                 }
-                if (rdpLayer instanceof RdpPatch) {
-                    RdpPatch patch = (RdpPatch) rdpLayer;
-                    logger.info(String.format("[DIAG #%d] totalPDUs=%d, bitmapUpdates=%d, rdp5Packets=%d, sent=%d, recv=%d, connected=%b, active=%b, rdp5=%b, licenceIssued=%b, securityType=%s",
-                            count[0], patch.getTotalPduCount(), patch.getBitmapUpdateCount(), patch.getRdp5PacketCount(),
-                            RdpTlsFix.RdpTransport.getSendPktCount(), RdpTlsFix.RdpTransport.getRecvPktCount(),
-                            rdpLayer.isConnected(), state.isActive(), state.isRDP5(), state.isLicenceIssued(),
-                            state.getSecurityType()));
-                }
-            }
-        }, 5000, 5000);
+            }, 5000, 5000);
+        }
     }
 
     /**

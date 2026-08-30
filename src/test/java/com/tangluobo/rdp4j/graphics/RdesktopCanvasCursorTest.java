@@ -54,6 +54,28 @@ class RdesktopCanvasCursorTest {
     }
 
     @Test
+    void usesAndMaskWhenLegacy32BitPointerHasNoAlphaChannel() {
+        RdesktopCanvas canvas = createCanvas();
+
+        // XRGB pointers use a zero reserved byte rather than an alpha channel.
+        // The first two pixels are visible and the last is transparent in the
+        // separate AND mask.
+        byte[] xorMask = {
+                0, 0, (byte) 255, 0,
+                0, (byte) 255, 0, 0,
+                0, 0, 0, 0
+        };
+        byte[] andMask = { 0x20, 0 };
+
+        RdpCursor cursor = canvas.createCursor(0, 0, 3, 1, andMask, xorMask, 0, 32);
+        java.awt.image.BufferedImage image = (java.awt.image.BufferedImage) cursor.getData();
+
+        assertEquals(0xffff0000, image.getRGB(0, 0), "zero reserved byte must not hide the cursor");
+        assertEquals(0xff00ff00, image.getRGB(1, 0));
+        assertEquals(0x00000000, image.getRGB(2, 0), "AND mask must keep the background transparent");
+    }
+
+    @Test
     void decodesBottomUpRowsAndKeepsHotspotCoordinates() {
         RdesktopCanvas canvas = createCanvas();
 
@@ -91,6 +113,28 @@ class RdesktopCanvasCursorTest {
         image.repaintRemote(0, 0, 2, 2);
 
         assertEquals(1, callbacks.get());
+    }
+
+    @Test
+    void drawsARegionFromALargerSourceWithoutPackingItFirst() throws Exception {
+        Options options = new Options();
+        options.setWidth(4);
+        options.setHeight(4);
+        State state = new State(options);
+        WrappedImage image = new WrappedImage(4, 4, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        RdesktopCanvas canvas = new RdesktopCanvas(new NoOpContext(), state, image, false);
+        int[] source = {
+                0, 0x112233, 0x445566, 0,
+                0, 0x778899, 0xaabbcc, 0
+        };
+
+        canvas.displayImageRegion(source, 1, 4, 1, 1, 2, 2);
+
+        assertEquals(0xff112233, image.getRGB(1, 1));
+        assertEquals(0xff445566, image.getRGB(2, 1));
+        assertEquals(0xff778899, image.getRGB(1, 2));
+        assertEquals(0xffaabbcc, image.getRGB(2, 2));
+        assertEquals(0xff000000, image.getRGB(0, 0));
     }
 
     private static RdesktopCanvas createCanvas() {

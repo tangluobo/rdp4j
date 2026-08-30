@@ -10,6 +10,8 @@ import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
 import java.awt.image.IndexColorModel;
 import java.nio.IntBuffer;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
@@ -18,7 +20,7 @@ import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
 import com.tangluobo.rdp4j.graphics.RdpCursor;
 
 import javafx.application.Platform;
-import javafx.animation.PauseTransition;
+import javafx.animation.AnimationTimer;
 import javafx.geometry.Bounds;
 import javafx.geometry.Dimension2D;
 import javafx.geometry.Rectangle2D;
@@ -31,7 +33,6 @@ import javafx.scene.image.WritableImage;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.Region;
 import javafx.scene.robot.Robot;
-import javafx.util.Duration;
 
 /** Pure JavaFX presentation of the protocol's raster backing store. */
 public final class FxRdpDisplay implements Display {
@@ -40,16 +41,28 @@ public final class FxRdpDisplay implements Display {
     private static final String HIDDEN_CURSOR_NAME = "hidden";
     private static final int REMOTE_ECHO_TOLERANCE = 2;
     private static final double MIN_SCREEN_WARP_DISTANCE = 4.0;
-    private static final int FRAME_CURSOR_SEARCH_RADIUS = 12;
-    private static final double FRAME_CURSOR_MATCH_THRESHOLD = 0.70;
-    private static final long FRAME_CURSOR_PROBE_WINDOW_NANOS = 1_000_000_000L;
+    private static final int LEGACY_VM_CURSOR_MAX_SIZE = 24;
+    private static final int MOVEMENT_PROBE_RADIUS = 24;
+    private static final int MOVEMENT_EVIDENCE_THRESHOLD = 3;
+    private static final long MOVEMENT_PROBE_INTERVAL_NANOS = 40_000_000L;
+    private static final long MOVEMENT_PROBE_TIMEOUT_NANOS = 400_000_000L;
 
     private final Object imageLock = new Object();
+    private final Object refreshLock = new Object();
     private final AtomicBoolean refreshPending = new AtomicBoolean();
     private final AtomicBoolean cursorProbePending = new AtomicBoolean();
     private final StackPane view = new StackPane();
     private final ImageView imageView = new ImageView();
-    private final PauseTransition cursorExitProbe = new PauseTransition(Duration.millis(450));
+    private final Deque<MovementProbe> movementProbes = new ArrayDeque<>();
+    private final AnimationTimer movementProbeTimer = new AnimationTimer() {
+        @Override
+        public void handle(long now) {
+            expireMovementProbes(now);
+            if (movementProbes.isEmpty()) {
+                stop();
+            }
+        }
+    };
     private volatile BufferedImage bufferedImage;
     private volatile BufferedImage displayedImage;
     private volatile PixelBuffer<IntBuffer> pixelBuffer;
@@ -62,11 +75,18 @@ public final class FxRdpDisplay implements Display {
     private String lastCursorMode;
     private String serverCursorMode = "default";
     private Cursor lastVisibleFxCursor = Cursor.DEFAULT;
-    private RdpCursor lastVisibleCursorTemplate;
+    private boolean softwareCursorProbeEligible;
     private boolean frameCursorSuppressed;
     private boolean pointerPositionSuppressed;
-    private int frameCursorMisses;
-    private long lastLocalPointerMoveNanos;
+    private int movementEvidence;
+    private int lastProbePointerX = Integer.MIN_VALUE;
+    private int lastProbePointerY = Integer.MIN_VALUE;
+    private long lastMovementProbeNanos;
+    private BufferedImage dirtyImage;
+    private int dirtyLeft = Integer.MAX_VALUE;
+    private int dirtyTop = Integer.MAX_VALUE;
+    private int dirtyRight = -1;
+    private int dirtyBottom = -1;
 
     public FxRdpDisplay(int width, int height) {
         requireFxThread();
@@ -78,7 +98,6 @@ public final class FxRdpDisplay implements Display {
         view.setMinSize(bufferedImage.getWidth(), bufferedImage.getHeight());
         view.setPrefSize(bufferedImage.getWidth(), bufferedImage.getHeight());
         view.getChildren().add(imageView);
-        cursorExitProbe.setOnFinished(event -> evaluateFrameCursor(false));
         installImage(bufferedImage);
     }
 
@@ -184,13 +203,13 @@ public final class FxRdpDisplay implements Display {
 
     @Override
     public void repaint(int x, int y, int width, int height) {
-        requestRefresh();
+        requestRefresh(x, y, width, height);
     }
 
     @Override
     public void repaintRemote(int x, int y, int width, int height) {
-        requestRefresh();
-        requestFrameCursorProbe();
+        requestRefresh(x, y, width, height);
+        requestMovementCorrelationCheck();
         if (width <= 0 || height <= 0) {
             return;
         }
@@ -232,9 +251,10 @@ public final class FxRdpDisplay implements Display {
             if (cursor == null || cursor.getData() == null) {
                 serverCursorMode = "default";
                 lastVisibleFxCursor = Cursor.DEFAULT;
-                lastVisibleCursorTemplate = null;
+                softwareCursorProbeEligible = false;
                 frameCursorSuppressed = false;
                 pointerPositionSuppressed = false;
+                resetMovementCorrelation();
                 view.setCursor(Cursor.DEFAULT);
                 logCursorMode("default");
                 return;
@@ -247,8 +267,10 @@ public final class FxRdpDisplay implements Display {
                 // fully transparent VM cursor mean the native cursor is hidden.
                 hasSeenHiddenCursor = true;
                 serverCursorMode = "hidden";
+                softwareCursorProbeEligible = false;
                 frameCursorSuppressed = false;
                 pointerPositionSuppressed = false;
+                resetMovementCorrelation();
                 view.setCursor(Cursor.NONE);
                 logCursorMode(HIDDEN_CURSOR_NAME.equals(cursor.getName())
                         ? "hidden-system" : "hidden-transparent");
@@ -272,12 +294,27 @@ public final class FxRdpDisplay implements Display {
             Cursor fxCursor = new ImageCursor(image, x, y);
             serverCursorMode = "custom";
             lastVisibleFxCursor = fxCursor;
-            lastVisibleCursorTemplate = cursor;
-            frameCursorSuppressed = false;
+            softwareCursorProbeEligible = isLegacyVmSoftwareCursorCandidate(
+                    sourceWidth, sourceHeight);
             pointerPositionSuppressed = false;
-            frameCursorMisses = 0;
-            view.setCursor(fxCursor);
-            logCursorMode("custom-" + sourceWidth + "x" + sourceHeight);
+            if (!softwareCursorProbeEligible) {
+                // The observed nested Linux console uses a legacy 24-pixel
+                // software pointer. Normal Windows cursors in this stream are
+                // 32-pixel protocol cursors; frame-change inference on those
+                // mistakes file highlights and context menus for a second
+                // cursor and hides the only visible pointer.
+                frameCursorSuppressed = false;
+                resetMovementCorrelation();
+            }
+            if (softwareCursorProbeEligible && frameCursorSuppressed
+                    && movementEvidence >= MOVEMENT_EVIDENCE_THRESHOLD) {
+                view.setCursor(Cursor.NONE);
+                logCursorMode("hidden-software-cursor");
+            } else {
+                frameCursorSuppressed = false;
+                view.setCursor(fxCursor);
+                logCursorMode("custom-" + sourceWidth + "x" + sourceHeight);
+            }
         };
         runOnFxThread(update);
     }
@@ -342,13 +379,50 @@ public final class FxRdpDisplay implements Display {
 
     void recordLocalPointerPosition(int x, int y) {
         requireFxThread();
+        int previousX = lastLocalPointerX;
+        int previousY = lastLocalPointerY;
         lastLocalPointerX = clamp(x, 0, getDisplayWidth() - 1);
         lastLocalPointerY = clamp(y, 0, getDisplayHeight() - 1);
-        lastLocalPointerMoveNanos = System.nanoTime();
-        if (hasSeenHiddenCursor && "custom".equals(serverCursorMode)
-                && !pointerPositionSuppressed) {
-            cursorExitProbe.playFromStart();
+        long now = System.nanoTime();
+        if (!softwareCursorProbeEligible || !"custom".equals(serverCursorMode)
+                || pointerPositionSuppressed
+                || previousX == Integer.MIN_VALUE || previousY == Integer.MIN_VALUE
+                || now - lastMovementProbeNanos < MOVEMENT_PROBE_INTERVAL_NANOS
+                || squaredDistance(lastProbePointerX, lastProbePointerY,
+                        lastLocalPointerX, lastLocalPointerY) < 9) {
+            return;
         }
+        MovementProbe probe = new MovementProbe(now,
+                FramePatch.capture(bufferedImage, previousX, previousY, MOVEMENT_PROBE_RADIUS),
+                FramePatch.capture(bufferedImage, lastLocalPointerX, lastLocalPointerY,
+                        MOVEMENT_PROBE_RADIUS));
+        while (movementProbes.size() >= 8) {
+            movementProbes.removeFirst();
+        }
+        movementProbes.addLast(probe);
+        lastProbePointerX = lastLocalPointerX;
+        lastProbePointerY = lastLocalPointerY;
+        lastMovementProbeNanos = now;
+        movementProbeTimer.start();
+    }
+
+    void recordLocalPointerButtonPosition(int x, int y) {
+        requireFxThread();
+        lastLocalPointerX = clamp(x, 0, getDisplayWidth() - 1);
+        lastLocalPointerY = clamp(y, 0, getDisplayHeight() - 1);
+        resetMovementCorrelation();
+        if (frameCursorSuppressed && "custom".equals(serverCursorMode)
+                && !pointerPositionSuppressed) {
+            frameCursorSuppressed = false;
+            view.setCursor(lastVisibleFxCursor);
+            logCursorMode("custom-pointer-button");
+        }
+    }
+
+    public static boolean isLegacyVmSoftwareCursorCandidate(int width, int height) {
+        return width > 0 && height > 0
+                && width <= LEGACY_VM_CURSOR_MAX_SIZE
+                && height <= LEGACY_VM_CURSOR_MAX_SIZE;
     }
 
     public static boolean isLocalPointerEcho(int serverX, int serverY,
@@ -372,122 +446,130 @@ public final class FxRdpDisplay implements Display {
                 && (currentMode == null || !currentMode.startsWith("hidden-"));
     }
 
-    private void requestFrameCursorProbe() {
-        if (System.nanoTime() - lastLocalPointerMoveNanos > FRAME_CURSOR_PROBE_WINDOW_NANOS
-                || !cursorProbePending.compareAndSet(false, true)) {
+    private void requestMovementCorrelationCheck() {
+        if (!cursorProbePending.compareAndSet(false, true)) {
             return;
         }
         runOnFxThread(() -> {
             cursorProbePending.set(false);
-            evaluateFrameCursor(true);
+            evaluateMovementCorrelation();
         });
     }
 
-    private void evaluateFrameCursor(boolean remoteFrameArrived) {
+    private void evaluateMovementCorrelation() {
         requireFxThread();
-        if (!hasSeenHiddenCursor || !"custom".equals(serverCursorMode)
-                || pointerPositionSuppressed || lastVisibleCursorTemplate == null
-                || lastLocalPointerX == Integer.MIN_VALUE || lastLocalPointerY == Integer.MIN_VALUE) {
+        if (!softwareCursorProbeEligible || !"custom".equals(serverCursorMode)
+                || pointerPositionSuppressed
+                || movementProbes.isEmpty()) {
             return;
         }
-        double score = cursorMatchScore(lastVisibleCursorTemplate.getData(),
-                lastVisibleCursorTemplate.getHotspot(), bufferedImage,
-                lastLocalPointerX, lastLocalPointerY, FRAME_CURSOR_SEARCH_RADIUS);
-        if (score >= FRAME_CURSOR_MATCH_THRESHOLD) {
-            frameCursorMisses = 0;
-            if (!frameCursorSuppressed) {
-                frameCursorSuppressed = true;
-                view.setCursor(Cursor.NONE);
-                logCursorMode("hidden-frame-cursor");
-            }
-            return;
-        }
-        if (!frameCursorSuppressed) {
-            return;
-        }
-        if (remoteFrameArrived && ++frameCursorMisses < 2) {
-            return;
-        }
-        frameCursorSuppressed = false;
-        frameCursorMisses = 0;
-        view.setCursor(lastVisibleFxCursor);
-        logCursorMode("custom-frame-exit");
-    }
-
-    public static double cursorMatchScore(Image cursor, Point hotspot, BufferedImage frame,
-                                          int pointerX, int pointerY, int searchRadius) {
-        if (cursor == null || frame == null) {
-            return 0;
-        }
-        BufferedImage template = toBufferedImage(cursor);
-        Point origin = hotspot == null ? new Point() : hotspot;
-        int opaquePixels = 0;
-        for (int y = 0; y < template.getHeight(); y++) {
-            for (int x = 0; x < template.getWidth(); x++) {
-                if ((template.getRGB(x, y) >>> 24) >= 224) {
-                    opaquePixels++;
-                }
+        MovementProbe matched = null;
+        for (var iterator = movementProbes.descendingIterator(); iterator.hasNext();) {
+            MovementProbe candidate = iterator.next();
+            if (candidate.matches(bufferedImage)) {
+                matched = candidate;
+                break;
             }
         }
-        if (opaquePixels < 8) {
-            return 0;
+        if (matched == null) {
+            return;
         }
-        double best = 0;
-        int radius = Math.max(0, searchRadius);
-        for (int offsetY = -radius; offsetY <= radius; offsetY++) {
-            for (int offsetX = -radius; offsetX <= radius; offsetX++) {
-                int startX = pointerX - origin.x + offsetX;
-                int startY = pointerY - origin.y + offsetY;
-                int compared = 0;
-                int matched = 0;
-                for (int y = 0; y < template.getHeight(); y++) {
-                    int frameY = startY + y;
-                    if (frameY < 0 || frameY >= frame.getHeight()) {
-                        continue;
-                    }
-                    for (int x = 0; x < template.getWidth(); x++) {
-                        int expected = template.getRGB(x, y);
-                        if ((expected >>> 24) < 224) {
-                            continue;
-                        }
-                        int frameX = startX + x;
-                        if (frameX < 0 || frameX >= frame.getWidth()) {
-                            continue;
-                        }
-                        compared++;
-                        if (colorsNear(expected, frame.getRGB(frameX, frameY), 40)) {
-                            matched++;
-                        }
-                    }
-                }
-                if (compared >= Math.max(8, opaquePixels / 2)) {
-                    best = Math.max(best, (double) matched / compared);
-                }
+        while (!movementProbes.isEmpty()) {
+            MovementProbe removed = movementProbes.removeFirst();
+            if (removed == matched) {
+                break;
             }
         }
-        return best;
+        movementEvidence = Math.min(MOVEMENT_EVIDENCE_THRESHOLD + 2, movementEvidence + 1);
+        if (movementEvidence >= MOVEMENT_EVIDENCE_THRESHOLD && !frameCursorSuppressed) {
+            frameCursorSuppressed = true;
+            view.setCursor(Cursor.NONE);
+            logCursorMode("hidden-software-cursor");
+        }
     }
 
-    private static boolean colorsNear(int first, int second, int tolerance) {
-        return Math.abs(((first >>> 16) & 0xff) - ((second >>> 16) & 0xff)) <= tolerance
-                && Math.abs(((first >>> 8) & 0xff) - ((second >>> 8) & 0xff)) <= tolerance
-                && Math.abs((first & 0xff) - (second & 0xff)) <= tolerance;
+    private void expireMovementProbes(long now) {
+        int misses = 0;
+        while (!movementProbes.isEmpty()
+                && now - movementProbes.peekFirst().createdNanos() >= MOVEMENT_PROBE_TIMEOUT_NANOS) {
+            movementProbes.removeFirst();
+            misses++;
+        }
+        if (misses == 0) {
+            return;
+        }
+        movementEvidence = Math.max(0, movementEvidence - misses);
+        if (frameCursorSuppressed && movementEvidence == 0
+                && "custom".equals(serverCursorMode) && !pointerPositionSuppressed) {
+            frameCursorSuppressed = false;
+            view.setCursor(lastVisibleFxCursor);
+            logCursorMode("custom-hardware-cursor");
+        }
     }
 
-    private static BufferedImage toBufferedImage(Image source) {
-        if (source instanceof BufferedImage buffered) {
-            return buffered;
+    private void resetMovementCorrelation() {
+        movementProbes.clear();
+        movementProbeTimer.stop();
+        movementEvidence = 0;
+        lastProbePointerX = Integer.MIN_VALUE;
+        lastProbePointerY = Integer.MIN_VALUE;
+        lastMovementProbeNanos = 0;
+    }
+
+    private static long squaredDistance(int firstX, int firstY, int secondX, int secondY) {
+        if (firstX == Integer.MIN_VALUE || firstY == Integer.MIN_VALUE) {
+            return Long.MAX_VALUE;
         }
-        int width = Math.max(1, source.getWidth(null));
-        int height = Math.max(1, source.getHeight(null));
-        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB_PRE);
-        Graphics2D graphics = image.createGraphics();
-        try {
-            graphics.drawImage(source, 0, 0, null);
-        } finally {
-            graphics.dispose();
+        long deltaX = (long) secondX - firstX;
+        long deltaY = (long) secondY - firstY;
+        return deltaX * deltaX + deltaY * deltaY;
+    }
+
+    public static boolean resemblesSoftwareCursorMovement(int oldChanged, int oldPixels,
+                                                           int newChanged, int newPixels) {
+        return isCursorSizedChange(oldChanged, oldPixels)
+                && isCursorSizedChange(newChanged, newPixels);
+    }
+
+    private static boolean isCursorSizedChange(int changed, int pixels) {
+        return pixels > 0 && changed >= 6 && changed <= Math.max(24, pixels * 45 / 100);
+    }
+
+    private record MovementProbe(long createdNanos, FramePatch oldPosition, FramePatch newPosition) {
+        boolean matches(BufferedImage frame) {
+            int oldChanged = oldPosition.changedPixels(frame);
+            int newChanged = newPosition.changedPixels(frame);
+            return resemblesSoftwareCursorMovement(oldChanged, oldPosition.pixelCount(),
+                    newChanged, newPosition.pixelCount());
         }
-        return image;
+    }
+
+    private record FramePatch(int x, int y, int width, int height, int[] pixels) {
+        static FramePatch capture(BufferedImage frame, int centerX, int centerY, int radius) {
+            int x = clamp(centerX - radius, 0, frame.getWidth() - 1);
+            int y = clamp(centerY - radius, 0, frame.getHeight() - 1);
+            int right = clamp(centerX + radius, 0, frame.getWidth() - 1);
+            int bottom = clamp(centerY + radius, 0, frame.getHeight() - 1);
+            int width = right - x + 1;
+            int height = bottom - y + 1;
+            return new FramePatch(x, y, width, height,
+                    frame.getRGB(x, y, width, height, null, 0, width));
+        }
+
+        int pixelCount() {
+            return pixels.length;
+        }
+
+        int changedPixels(BufferedImage frame) {
+            int[] current = frame.getRGB(x, y, width, height, null, 0, width);
+            int changed = 0;
+            for (int i = 0; i < pixels.length; i++) {
+                if ((pixels[i] & 0x00ffffff) != (current[i] & 0x00ffffff)) {
+                    changed++;
+                }
+            }
+            return changed;
+        }
     }
 
     private void logCursorMode(String mode) {
@@ -510,44 +592,101 @@ public final class FxRdpDisplay implements Display {
     @Override
     public void setRGB(int x, int y, int width, int height, int[] data, int offset, int scanWidth) {
         IndexColorModel current = colorModel;
-        int[] converted = new int[width * height];
+        BufferedImage image = bufferedImage;
+        int[] target = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+        if (current == null) {
+            copyOpaquePixels(target, image.getWidth(), x, y,
+                    data, offset, scanWidth, width, height);
+            return;
+        }
         for (int row = 0; row < height; row++) {
+            int sourceIndex = offset + row * scanWidth;
+            int targetIndex = (y + row) * image.getWidth() + x;
             for (int column = 0; column < width; column++) {
-                int color = data[offset + row * scanWidth + column];
-                converted[row * width + column] = opaque(current == null ? color : current.getRGB(color));
+                target[targetIndex + column] = opaque(current.getRGB(data[sourceIndex + column]));
             }
         }
-        bufferedImage.setRGB(x, y, width, height, converted, 0, width);
     }
 
     @Override
     public void setRGBNoConversion(int x, int y, int width, int height, int[] data, int offset, int scanWidth) {
-        int[] opaquePixels = new int[width * height];
-        for (int row = 0; row < height; row++) {
-            for (int column = 0; column < width; column++) {
-                opaquePixels[row * width + column] = opaque(data[offset + row * scanWidth + column]);
-            }
-        }
-        bufferedImage.setRGB(x, y, width, height, opaquePixels, 0, width);
+        BufferedImage image = bufferedImage;
+        int[] target = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+        copyOpaquePixels(target, image.getWidth(), x, y,
+                data, offset, scanWidth, width, height);
     }
 
     private void requestRefresh() {
-        if (!refreshPending.compareAndSet(false, true)) {
+        BufferedImage image = bufferedImage;
+        requestRefresh(0, 0, image.getWidth(), image.getHeight());
+    }
+
+    private void requestRefresh(int x, int y, int width, int height) {
+        if (width <= 0 || height <= 0) {
             return;
         }
-        Platform.runLater(() -> {
-            refreshPending.set(false);
-            BufferedImage current = bufferedImage;
-            if (displayedImage != current) {
-                installImage(current);
-            } else {
-                PixelBuffer<IntBuffer> currentBuffer = pixelBuffer;
-                if (currentBuffer != null) {
-                    currentBuffer.updateBuffer(ignored ->
-                            new Rectangle2D(0, 0, current.getWidth(), current.getHeight()));
-                }
+        BufferedImage image = bufferedImage;
+        int imageWidth = image.getWidth();
+        int imageHeight = image.getHeight();
+        int left = clamp(x, 0, imageWidth);
+        int top = clamp(y, 0, imageHeight);
+        int right = (int) Math.max(0, Math.min((long) imageWidth, (long) x + width));
+        int bottom = (int) Math.max(0, Math.min((long) imageHeight, (long) y + height));
+        if (right <= left || bottom <= top) {
+            return;
+        }
+
+        boolean schedule;
+        synchronized (refreshLock) {
+            if (dirtyImage != image) {
+                dirtyImage = image;
+                clearDirtyRegion();
             }
-        });
+            dirtyLeft = Math.min(dirtyLeft, left);
+            dirtyTop = Math.min(dirtyTop, top);
+            dirtyRight = Math.max(dirtyRight, right);
+            dirtyBottom = Math.max(dirtyBottom, bottom);
+            schedule = refreshPending.compareAndSet(false, true);
+        }
+        if (schedule) {
+            Platform.runLater(this::flushRefresh);
+        }
+    }
+
+    private void flushRefresh() {
+        BufferedImage current;
+        Rectangle2D dirtyRegion;
+        synchronized (refreshLock) {
+            current = bufferedImage;
+            if (dirtyImage != current) {
+                dirtyImage = current;
+                dirtyLeft = 0;
+                dirtyTop = 0;
+                dirtyRight = current.getWidth();
+                dirtyBottom = current.getHeight();
+            }
+            dirtyRegion = dirtyRight > dirtyLeft && dirtyBottom > dirtyTop
+                    ? new Rectangle2D(dirtyLeft, dirtyTop,
+                            dirtyRight - dirtyLeft, dirtyBottom - dirtyTop)
+                    : null;
+            clearDirtyRegion();
+            refreshPending.set(false);
+        }
+        if (displayedImage != current) {
+            installImage(current);
+        } else if (dirtyRegion != null) {
+            PixelBuffer<IntBuffer> currentBuffer = pixelBuffer;
+            if (currentBuffer != null) {
+                currentBuffer.updateBuffer(ignored -> dirtyRegion);
+            }
+        }
+    }
+
+    private void clearDirtyRegion() {
+        dirtyLeft = Integer.MAX_VALUE;
+        dirtyTop = Integer.MAX_VALUE;
+        dirtyRight = -1;
+        dirtyBottom = -1;
     }
 
     private void installImage(BufferedImage image) {
@@ -570,6 +709,18 @@ public final class FxRdpDisplay implements Display {
 
     private static int opaque(int color) {
         return color | 0xff000000;
+    }
+
+    static void copyOpaquePixels(int[] target, int targetStride, int targetX, int targetY,
+                                 int[] source, int sourceOffset, int sourceStride,
+                                 int width, int height) {
+        for (int row = 0; row < height; row++) {
+            int sourceIndex = sourceOffset + row * sourceStride;
+            int targetIndex = (targetY + row) * targetStride + targetX;
+            for (int column = 0; column < width; column++) {
+                target[targetIndex + column] = opaque(source[sourceIndex + column]);
+            }
+        }
     }
 
     private static int clamp(int value, int minimum, int maximum) {

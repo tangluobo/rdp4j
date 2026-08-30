@@ -24,6 +24,7 @@ import com.tangluobo.rdp4j.rdp5.VChannels;
 public class RdpPatch extends Rdp {
 
     private static final Logger logger = Logger.getLogger(RdpPatch.class.getName());
+    private static final boolean DIAGNOSTICS_ENABLED = Boolean.getBoolean("rdp4j.diagnostics");
 
     private final State stateRef;
     private final AtomicInteger bitmapUpdateCount = new AtomicInteger(0);
@@ -278,30 +279,35 @@ public class RdpPatch extends Rdp {
             return;
         }
 
-        // 看门狗线程：每10秒检查mainLoop是否卡在receive()
-        Thread watchdog = new Thread(() -> {
-            try {
-                while (!Thread.currentThread().isInterrupted()) {
-                    Thread.sleep(10000);
-                    long stuckMs = System.currentTimeMillis() - lastReceiveEnterTime;
-                    if (stuckMs > 10000 && lastReceiveEnterTime > 0) {
-                        logger.warning(String.format(
-                            "[WATCHDOG] mainLoop已卡在receive() %.1f秒, totalPDUs=%d, bitmaps=%d, rdp5=%d, sent=%d, recv=%d, bcInAvailable=%d, active=%b, licenceIssued=%b, lastReason=0x%x, isoInjected=%b, isoRecvCalled=%b, isoError=%s, PDU历史=%s",
-                            stuckMs / 1000.0, totalPduCount.get(), bitmapUpdateCount.get(),
-                            rdp5PacketCount.get(), RdpTlsFix.RdpTransport.getSendPktCount(),
-                            RdpTlsFix.RdpTransport.getRecvPktCount(),
-                            RdpTlsFix.RdpTransport.getBcInAvailable(),
-                            stateRef.isActive(), stateRef.isLicenceIssued(),
-                            stateRef.getLastReason(),
-                            RdpIsoFix.isInjected(), RdpIsoFix.isReceiveCalled(),
-                            RdpIsoFix.getInjectError(),
-                            String.join(",", pduHistory)));
+        // receive() also dispatches healthy fast-path traffic and can therefore stay
+        // blocked for the entire session. Keep the expensive watchdog/log stream
+        // opt-in so normal interactive sessions do not write a warning every 10s.
+        Thread watchdog = null;
+        if (DIAGNOSTICS_ENABLED) {
+            watchdog = new Thread(() -> {
+                try {
+                    while (!Thread.currentThread().isInterrupted()) {
+                        Thread.sleep(10000);
+                        long stuckMs = System.currentTimeMillis() - lastReceiveEnterTime;
+                        if (stuckMs > 10000 && lastReceiveEnterTime > 0) {
+                            logger.warning(String.format(
+                                "[WATCHDOG] receive()等待slow-path PDU %.1f秒, totalPDUs=%d, bitmaps=%d, rdp5=%d, sent=%d, recv=%d, bcInAvailable=%d, active=%b, licenceIssued=%b, lastReason=0x%x, isoInjected=%b, isoRecvCalled=%b, isoError=%s, PDU历史=%s",
+                                stuckMs / 1000.0, totalPduCount.get(), bitmapUpdateCount.get(),
+                                rdp5PacketCount.get(), RdpTlsFix.RdpTransport.getSendPktCount(),
+                                RdpTlsFix.RdpTransport.getRecvPktCount(),
+                                RdpTlsFix.RdpTransport.getBcInAvailable(),
+                                stateRef.isActive(), stateRef.isLicenceIssued(),
+                                stateRef.getLastReason(),
+                                RdpIsoFix.isInjected(), RdpIsoFix.isReceiveCalled(),
+                                RdpIsoFix.getInjectError(),
+                                String.join(",", pduHistory)));
+                        }
                     }
-                }
-            } catch (InterruptedException e) { /* 正常退出 */ }
-        }, "RDP-Watchdog");
-        watchdog.setDaemon(true);
-        watchdog.start();
+                } catch (InterruptedException e) { /* 正常退出 */ }
+            }, "RDP-Watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+        }
 
         try {
         int[] type = new int[1];
@@ -309,7 +315,9 @@ public class RdpPatch extends Rdp {
         while (true) {
             // 调用private receive()
             data = null;
-            lastReceiveEnterTime = System.currentTimeMillis();
+            if (DIAGNOSTICS_ENABLED) {
+                lastReceiveEnterTime = System.currentTimeMillis();
+            }
             try {
                 data = (com.tangluobo.rdp4j.Packet) receiveMethod.invoke(this, (Object) type);
                 if (data == null) {
@@ -352,55 +360,60 @@ public class RdpPatch extends Rdp {
             case 0: pduName = "KEEPALIVE"; break;
             default: pduName = "UNKNOWN(" + pduType + ")"; break;
             }
-            int dataAvail = data.getEnd() - data.getPosition();
-            // 对DATA PDU(type=7)，解析子类型(shareDataHeader中的dataType)
-            String dataSubType = "";
-            if (pduType == 7 && dataAvail >= 9) {
-                int savePos = data.getPosition();
-                data.incrementPosition(6); // skip shareid(4)+pad(1)+streamid(1)
-                data.getLittleEndian16(); // len
-                int dataType = data.get8();
-                data.setPosition(savePos);
-                dataSubType = " subType=" + dataType;
-                switch (dataType) {
-                    case 0: dataSubType += "(UPDATE)"; break;
-                    case 2: dataSubType += "(UPDATE_BITMAP)"; break; 
-                    case 3: dataSubType += "(PALETTE)"; break;
-                    case 20: dataSubType += "(CONTROL)"; break;
-                    case 27: dataSubType += "(POINTER)"; break;
-                    case 31: dataSubType += "(SYNCHRONISE)"; break;
-                    case 33: dataSubType += "(REFRESH_RECT)"; break;
-                    case 34: dataSubType += "(PLAY_SOUND)"; break;
-                    case 36: dataSubType += "(SUPPRESS_OUTPUT)"; break;
-                    case 37: dataSubType += "(SAVE_SESSION_INFO)"; break;
-                    case 38: dataSubType += "(FONTLIST)"; break;
-                    case 39: dataSubType += "(FONTMAP)"; break;
-                    case 40: dataSubType += "(SET_KEYBOARD_INDICATORS)"; break;
-                    case 47: dataSubType += "(SET_ERROR_INFO)"; break;
-                    default: break;
+            if (DIAGNOSTICS_ENABLED) {
+                int dataAvail = data.getEnd() - data.getPosition();
+                // 对DATA PDU(type=7)，解析子类型(shareDataHeader中的dataType)
+                String dataSubType = "";
+                if (pduType == 7 && dataAvail >= 9) {
+                    int savePos = data.getPosition();
+                    data.incrementPosition(6); // skip shareid(4)+pad(1)+streamid(1)
+                    data.getLittleEndian16(); // len
+                    int dataType = data.get8();
+                    data.setPosition(savePos);
+                    dataSubType = " subType=" + dataType;
+                    switch (dataType) {
+                        case 0: dataSubType += "(UPDATE)"; break;
+                        case 2: dataSubType += "(UPDATE_BITMAP)"; break;
+                        case 3: dataSubType += "(PALETTE)"; break;
+                        case 20: dataSubType += "(CONTROL)"; break;
+                        case 27: dataSubType += "(POINTER)"; break;
+                        case 31: dataSubType += "(SYNCHRONISE)"; break;
+                        case 33: dataSubType += "(REFRESH_RECT)"; break;
+                        case 34: dataSubType += "(PLAY_SOUND)"; break;
+                        case 36: dataSubType += "(SUPPRESS_OUTPUT)"; break;
+                        case 37: dataSubType += "(SAVE_SESSION_INFO)"; break;
+                        case 38: dataSubType += "(FONTLIST)"; break;
+                        case 39: dataSubType += "(FONTMAP)"; break;
+                        case 40: dataSubType += "(SET_KEYBOARD_INDICATORS)"; break;
+                        case 47: dataSubType += "(SET_ERROR_INFO)"; break;
+                        default: break;
+                    }
                 }
-            }
-            pduHistory.add(String.format("#%d:%s%s", pduCount, pduName, dataSubType.isEmpty() ? "" : dataSubType.split("=")[1].replace(")", "").replace("(", "")));
-            logger.info(String.format("[MAINLOOP] PDU #%d: type=%s(%d)%s, dataSize=%d",
-                    pduCount, pduName, pduType, dataSubType, dataAvail));
-
-            // DEMAND_ACTIVE处理后，记录关键状态
-            if (pduType == 1) {
-                logger.info(String.format("[CAPS] serverBpp=%d, width=%d, height=%d, rdp5=%b, serverChannelId=%d, shareId=%d",
-                        stateRef.getServerBpp(), stateRef.getWidth(), stateRef.getHeight(),
-                        stateRef.isRDP5(), stateRef.getServerChannelId(), stateRef.getShareId()));
-            }
-
-            // 诊断：输出data的前16字节hex
-            if (dataAvail > 0) {
-                int savePos = data.getPosition();
-                int dumpLen = Math.min(dataAvail, 32);
-                StringBuilder hexSb = new StringBuilder("[MAINLOOP] PDU #" + pduCount + " hex:");
-                for (int i = 0; i < dumpLen; i++) {
-                    hexSb.append(String.format(" %02x", data.get8()));
+                if (pduHistory.size() >= 32) {
+                    pduHistory.remove(0);
                 }
-                data.setPosition(savePos);
-                logger.info(hexSb.toString());
+                pduHistory.add(String.format("#%d:%s%s", pduCount, pduName, dataSubType.isEmpty() ? "" : dataSubType.split("=")[1].replace(")", "").replace("(", "")));
+                logger.info(String.format("[MAINLOOP] PDU #%d: type=%s(%d)%s, dataSize=%d",
+                        pduCount, pduName, pduType, dataSubType, dataAvail));
+
+                // DEMAND_ACTIVE处理后，记录关键状态
+                if (pduType == 1) {
+                    logger.info(String.format("[CAPS] serverBpp=%d, width=%d, height=%d, rdp5=%b, serverChannelId=%d, shareId=%d",
+                            stateRef.getServerBpp(), stateRef.getWidth(), stateRef.getHeight(),
+                            stateRef.isRDP5(), stateRef.getServerChannelId(), stateRef.getShareId()));
+                }
+
+                // 诊断：输出data的前32字节hex
+                if (dataAvail > 0) {
+                    int savePos = data.getPosition();
+                    int dumpLen = Math.min(dataAvail, 32);
+                    StringBuilder hexSb = new StringBuilder("[MAINLOOP] PDU #" + pduCount + " hex:");
+                    for (int i = 0; i < dumpLen; i++) {
+                        hexSb.append(String.format(" %02x", data.get8()));
+                    }
+                    data.setPosition(savePos);
+                    logger.info(hexSb.toString());
+                }
             }
 
             // 调用private processPacket()
@@ -423,7 +436,7 @@ public class RdpPatch extends Rdp {
                 throw new RdesktopException("reflective processPacket failed: " + e.getMessage(), e);
             }
             long processMs = System.currentTimeMillis() - processStart;
-            if (processMs > 100) {
+            if (DIAGNOSTICS_ENABLED && processMs > 100) {
                 logger.info(String.format("[MAINLOOP] PDU #%d (%s) processPacket耗时 %dms", pduCount, pduName, processMs));
             }
 
@@ -446,7 +459,7 @@ public class RdpPatch extends Rdp {
             }
 
             // 诊断：processPacket后stream状态
-            try {
+            if (DIAGNOSTICS_ENABLED) try {
                 if (streamField != null && nextPacketField != null) {
                     Object stream = streamField.get(this);
                     int nextPkt = nextPacketField.getInt(this);
@@ -471,8 +484,14 @@ public class RdpPatch extends Rdp {
             // its old Swing canvas can dispatch another queued input event.
             markConnectionClosed();
             lastReceiveEnterTime = 0;
-            watchdog.interrupt();
+            if (watchdog != null) {
+                watchdog.interrupt();
+            }
         }
+    }
+
+    static boolean isDiagnosticsEnabled() {
+        return DIAGNOSTICS_ENABLED;
     }
 
     public int getBitmapUpdateCount() { return bitmapUpdateCount.get(); }

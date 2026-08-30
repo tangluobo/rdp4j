@@ -4,12 +4,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 
 public class DefaultIO implements IO {
 	private InetAddress address;
 	private int port;
 	private Socket socket;
+	private boolean lowLatency;
 
 	public DefaultIO(InetAddress server, int port) {
 		this.address = server;
@@ -18,10 +20,20 @@ public class DefaultIO implements IO {
 
 	@Override
 	public void closeIO() throws IOException {
+		Socket current = socket;
+		if (current == null) return;
 		try {
-			socket.close();
+			current.close();
 		} finally {
 			socket = null;
+		}
+	}
+
+	@Override
+	public void setLowLatency(boolean lowLatency) throws IOException {
+		this.lowLatency = lowLatency;
+		if (socket != null) {
+			socket.setTcpNoDelay(lowLatency);
 		}
 	}
 
@@ -48,7 +60,18 @@ public class DefaultIO implements IO {
 
 	void checkConnected() throws IOException {
 		if (socket == null) {
-			socket = new Socket(address, port);
+			Socket candidate = new Socket();
+			try {
+				candidate.setTcpNoDelay(lowLatency);
+				candidate.connect(new InetSocketAddress(address, port));
+				socket = candidate;
+			} catch (IOException | RuntimeException error) {
+				try {
+					candidate.close();
+				} catch (IOException ignored) {
+				}
+				throw error;
+			}
 		}
 	}
 
