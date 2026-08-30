@@ -1,33 +1,43 @@
 package com.tangluobo.rdp4j;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 import javafx.scene.input.KeyCode;
-import javafx.scene.input.KeyEvent;
+import com.tangluobo.rdp4j.frontend.FxRdpInput;
 
 class RdpPaneKeyboardBridgeTest {
 
     @Test
-    void convertsJavaFxModifiersForDirectRdpDispatch() {
-        KeyEvent event = new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.A,
-                true, true, true, true);
-
-        int expected = java.awt.event.InputEvent.SHIFT_DOWN_MASK
-                | java.awt.event.InputEvent.CTRL_DOWN_MASK
-                | java.awt.event.InputEvent.ALT_DOWN_MASK
-                | java.awt.event.InputEvent.META_DOWN_MASK;
-        assertEquals(expected, RdpPane.toAwtModifiers(event));
+    void mapsOrdinaryKeysDirectlyToSetOneScancodes() {
+        assertEquals(0x1e, FxRdpInput.scancodeFor(KeyCode.A));
+        assertEquals(0x02, FxRdpInput.scancodeFor(KeyCode.DIGIT1));
+        assertEquals(0x53 | 0x80, FxRdpInput.scancodeFor(KeyCode.DELETE));
     }
 
     @Test
-    void preservesNumpadLocationForRemoteKeymap() {
-        assertEquals(java.awt.event.KeyEvent.KEY_LOCATION_NUMPAD,
-                RdpPane.toAwtKeyLocation(KeyCode.NUMPAD1));
-        assertEquals(java.awt.event.KeyEvent.KEY_LOCATION_NUMPAD,
-                RdpPane.toAwtKeyLocation(KeyCode.KP_DOWN));
-        assertEquals(java.awt.event.KeyEvent.KEY_LOCATION_STANDARD,
-                RdpPane.toAwtKeyLocation(KeyCode.DIGIT1));
+    void mapsNumpadKeysWithoutAwtLocationTranslation() {
+        assertEquals(0x4f, FxRdpInput.scancodeFor(KeyCode.NUMPAD1));
+        assertEquals(0x50, FxRdpInput.scancodeFor(KeyCode.KP_DOWN));
+        assertEquals(0x48, FxRdpInput.scancodeFor(KeyCode.KP_UP));
+        assertEquals(0x35 | 0x80, FxRdpInput.scancodeFor(KeyCode.DIVIDE));
+    }
+
+    @Test
+    void identifiesKeysThatNeedLateNumLockSynchronization() {
+        assertTrue(FxRdpInput.isKeypadLockDependent(KeyCode.NUMPAD0));
+        assertTrue(FxRdpInput.isKeypadLockDependent(KeyCode.NUMPAD9));
+        assertTrue(FxRdpInput.isKeypadLockDependent(KeyCode.KP_UP));
+        assertFalse(FxRdpInput.isKeypadLockDependent(KeyCode.DIGIT1));
+        assertFalse(FxRdpInput.isKeypadLockDependent(KeyCode.ADD));
+    }
+
+    @Test
+    void buildsAbsolutePureFxToggleFlags() {
+        assertEquals(0x02, FxRdpInput.toggleFlags(false, true, false));
+        assertEquals(0x07, FxRdpInput.toggleFlags(true, true, true));
     }
 }

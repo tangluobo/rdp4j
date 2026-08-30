@@ -1,6 +1,8 @@
 package com.tangluobo.rdp4j;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -9,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
 import com.tangluobo.rdp4j.graphics.RdpCursor;
+import com.tangluobo.rdp4j.graphics.WrappedImage;
 import com.tangluobo.rdp4j.rdp5.VChannels;
 
 class DrdynvcMouseCursorTest {
@@ -110,6 +113,82 @@ class DrdynvcMouseCursorTest {
         assertEquals(1, cursor.getHotspot().y);
     }
 
+    @Test
+    void appliesFastPathPointerPositionToDisplay() throws Exception {
+        Options options = new Options();
+        options.setWidth(800);
+        options.setHeight(600);
+        State state = new State(options);
+        RecordingImage display = new RecordingImage();
+        new RdesktopCanvas(new NoOpContext(), state, display, false);
+        RdpPatch rdp = new RdpPatch(new NoOpContext(), state, new VChannels(state));
+        byte[] position = new byte[4];
+        putU16(position, 0, 321);
+        putU16(position, 2, 234);
+
+        rdp.rdp5_process(fastPathFragment(8, 0, position, 0, position.length), false, false);
+
+        assertEquals(321, display.pointerX);
+        assertEquals(234, display.pointerY);
+    }
+
+    @Test
+    void appliesMouseCursorChannelPointerPositionToDisplay() throws Exception {
+        Options options = new Options();
+        options.setWidth(800);
+        options.setHeight(600);
+        State state = new State(options);
+        RecordingImage display = new RecordingImage();
+        new RdesktopCanvas(new NoOpContext(), state, display, false);
+        DrdynvcChannel channel = new DrdynvcChannel();
+        channel.start(null, state, null);
+        byte[] position = new byte[8];
+        position[0] = 3; // MOUSEPTR_UPDATE
+        position[1] = 8; // POINTER_POSITION
+        putU16(position, 4, 456);
+        putU16(position, 6, 345);
+
+        channel.processMouseCursorData(position);
+
+        assertEquals(456, display.pointerX);
+        assertEquals(345, display.pointerY);
+    }
+
+    @Test
+    void missingFastPathCachedPointerRestoresDefaultCursor() throws Exception {
+        Options options = new Options();
+        State state = new State(options);
+        RecordingImage display = new RecordingImage();
+        new RdesktopCanvas(new NoOpContext(), state, display, false);
+        RdpPatch rdp = new RdpPatch(new NoOpContext(), state, new VChannels(state));
+        byte[] cacheReference = new byte[2];
+        putU16(cacheReference, 0, 31);
+
+        rdp.rdp5_process(fastPathFragment(10, 0, cacheReference, 0, 2), false, false);
+
+        assertTrue(display.cursorUpdated);
+        assertNull(display.lastCursor);
+    }
+
+    @Test
+    void missingMouseCursorChannelCachedPointerRestoresDefaultCursor() throws Exception {
+        Options options = new Options();
+        State state = new State(options);
+        RecordingImage display = new RecordingImage();
+        new RdesktopCanvas(new NoOpContext(), state, display, false);
+        DrdynvcChannel channel = new DrdynvcChannel();
+        channel.start(null, state, null);
+        byte[] cacheReference = new byte[6];
+        cacheReference[0] = 3; // MOUSEPTR_UPDATE
+        cacheReference[1] = 10; // CACHED_POINTER
+        putU16(cacheReference, 4, 31);
+
+        channel.processMouseCursorData(cacheReference);
+
+        assertTrue(display.cursorUpdated);
+        assertNull(display.lastCursor);
+    }
+
     private static Packet fastPathFragment(int type, int fragmentation,
             byte[] data, int offset, int length) {
         byte[] packet = new byte[3 + length];
@@ -157,5 +236,28 @@ class DrdynvcMouseCursorTest {
         @Override public void setLoggedOn() { }
         @Override public void toggleFullScreen() { }
         @Override public void ready(ReadyType ready) { }
+    }
+
+    private static final class RecordingImage extends WrappedImage {
+        private int pointerX = -1;
+        private int pointerY = -1;
+        private boolean cursorUpdated;
+        private RdpCursor lastCursor;
+
+        private RecordingImage() {
+            super(800, 600, BufferedImage.TYPE_INT_RGB);
+        }
+
+        @Override
+        public void movePointer(int x, int y) {
+            pointerX = x;
+            pointerY = y;
+        }
+
+        @Override
+        public void setCursor(RdpCursor cursor) {
+            cursorUpdated = true;
+            lastCursor = cursor;
+        }
     }
 }

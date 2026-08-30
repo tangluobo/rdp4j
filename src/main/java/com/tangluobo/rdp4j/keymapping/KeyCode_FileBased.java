@@ -351,6 +351,22 @@ public class KeyCode_FileBased {
 		addKeyCodeMapping(mappings, KeyEvent.VK_KP_DOWN, 0x50);
 		addKeyCodeMapping(mappings, KeyEvent.VK_KP_LEFT, 0x4b);
 		addKeyCodeMapping(mappings, KeyEvent.VK_KP_RIGHT, 0x4d);
+		// AWT retains KEY_LOCATION_NUMPAD when Num Lock is off even though the
+		// virtual key changes to the navigation-cluster code. These definitions
+		// keep the physical keypad scan code non-extended; the synchronized remote
+		// Num Lock state decides whether it becomes a number or navigation action.
+		addKeyCodeMapping(mappings, KeyEvent.VK_INSERT, 0x52);
+		addKeyCodeMapping(mappings, KeyEvent.VK_END, 0x4f);
+		addKeyCodeMapping(mappings, KeyEvent.VK_DOWN, 0x50);
+		addKeyCodeMapping(mappings, KeyEvent.VK_PAGE_DOWN, 0x51);
+		addKeyCodeMapping(mappings, KeyEvent.VK_LEFT, 0x4b);
+		addKeyCodeMapping(mappings, KeyEvent.VK_CLEAR, 0x4c);
+		addKeyCodeMapping(mappings, KeyEvent.VK_RIGHT, 0x4d);
+		addKeyCodeMapping(mappings, KeyEvent.VK_HOME, 0x47);
+		addKeyCodeMapping(mappings, KeyEvent.VK_UP, 0x48);
+		addKeyCodeMapping(mappings, KeyEvent.VK_PAGE_UP, 0x49);
+		addKeyCodeMapping(mappings, KeyEvent.VK_DELETE, 0x53);
+		addKeyCodeMapping(mappings, KeyEvent.VK_ENTER, 0x1c | SCANCODE_EXTENDED);
 	}
 
 	private void addKeyCodeMapping(Vector mappings, int keyCode, int scancode) {

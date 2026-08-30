@@ -21,9 +21,15 @@ The artifact coordinates are:
 <dependency>
     <groupId>com.tangluobo</groupId>
     <artifactId>rdp4j</artifactId>
-    <version>1.0.2</version>
+    <version>1.0.5</version>
 </dependency>
 ```
+
+The frontend is selected explicitly through `RdpFrontend`. `SwingRdpFrontend`
+retains the original Swing canvas and input path, while `FxRdpFrontend` uses a
+JavaFX `WritableImage`/`ImageView` and sends JavaFX key and mouse events directly
+as RDP input messages. `RdpPane` selects the pure JavaFX frontend and does not
+embed Swing.
 
 The JAR declares the automatic JPMS module name `rdp4j`. Keyboard maps are
 packaged in the JAR under `/keymaps`.

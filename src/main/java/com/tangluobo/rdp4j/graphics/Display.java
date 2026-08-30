@@ -5,22 +5,10 @@ import java.awt.Graphics;
 import java.awt.Image;
 import java.awt.Point;
 import java.awt.Rectangle;
-import java.awt.event.KeyListener;
-import java.awt.event.MouseListener;
-import java.awt.event.MouseMotionListener;
-import java.awt.event.MouseWheelListener;
 import java.awt.image.BufferedImage;
 import java.awt.image.IndexColorModel;
 
 public interface Display {
-
-	void addKeyListener(KeyListener keyListener);
-
-	void addMouseListener(MouseListener mouseListener);
-
-	void addMouseMotionListener(MouseMotionListener mouseMotionListener);
-
-	void addMouseWheelListener(MouseWheelListener mouseWheelListener);
 
 	/**
 	 * Force a colour to its true RGB representation (extracting from colour
@@ -45,6 +33,10 @@ public interface Display {
 
 	Point getLocationOnScreen();
 
+	/** Apply a server-requested pointer position in remote desktop coordinates. */
+	default void movePointer(int x, int y) {
+	}
+
 	int getRGB(int x, int y);
 
 	int[] getRGB(int x, int y, int cx, int cy, int[] data, int offset, int width);
@@ -53,14 +45,6 @@ public interface Display {
 	
 	void init(RdesktopCanvas canvas);
 
-	void removeKeyListener(KeyListener keyListener);
-
-	void removeMouseListener(MouseListener mouseListener);
-
-	void removeMouseMotionListener(MouseMotionListener mouseMotionListener);
-
-	void removeMouseWheelListener(MouseWheelListener mouseWheelListener);
-
 	void repaint();
 
 	void repaint(int x, int y, int cx, int cy);
@@ -68,6 +52,10 @@ public interface Display {
 	/** Repaint caused by newly decoded remote desktop pixels or drawing orders. */
 	default void repaintRemote(int x, int y, int cx, int cy) {
 		repaint(x, y, cx, cy);
+	}
+
+	/** One-shot notification after the first decoded remote update. */
+	default void setFirstRemoteUpdateListener(Runnable listener) {
 	}
 
 	void resizeDisplay(Dimension dimension);
@@ -106,7 +94,5 @@ public interface Display {
 	 *            width of a line in data (measured in pixels)
 	 */
 	void setRGBNoConversion(int x, int y, int cx, int cy, int[] data, int offset, int w);
-
-	boolean getLockingKeyState(int vk);
 
 }

@@ -12,13 +12,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.Objects;
 
 import javax.net.ssl.X509TrustManager;
 import javax.swing.JComponent;
-import javax.swing.SwingUtilities;
 
+import com.tangluobo.rdp4j.frontend.RdpFrontend;
+import com.tangluobo.rdp4j.frontend.SwingRdpFrontend;
 import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
-import com.tangluobo.rdp4j.graphics.WrappedImage;
 import com.tangluobo.rdp4j.io.DefaultIO;
 import com.tangluobo.rdp4j.keymapping.KeyCode_FileBased;
 import com.tangluobo.rdp4j.layers.Rdp;
@@ -64,6 +65,7 @@ public class RdpClient {
     private final AtomicLong firstFrameNotifiedAttempt = new AtomicLong();
     private final AtomicBoolean disconnectNotified = new AtomicBoolean();
     private volatile long currentAttemptId;
+    private final RdpFrontend frontend;
 
     /**
      * 嵌入式IContext实现，不创建独立窗口
@@ -171,6 +173,11 @@ public class RdpClient {
     }
 
     public RdpClient() {
+        this(new SwingRdpFrontend());
+    }
+
+    public RdpClient(RdpFrontend frontend) {
+        this.frontend = Objects.requireNonNull(frontend, "frontend");
     }
 
     /**
@@ -302,7 +309,7 @@ public class RdpClient {
         EmbeddedContext context = new EmbeddedContext(attemptId, state);
 
         // 创建画布（不在SwingNode中显示，直到ready回调触发）
-        canvas = new RdesktopCanvas(context, state);
+        canvas = createFrontendCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
         configureDisplayFrameCallback(canvas, attemptId);
@@ -449,7 +456,9 @@ public class RdpClient {
             // UnicodeHandler编码bug（中文乱码）、远程→本地格式选择问题
             FixedClipChannel clipChannel = new FixedClipChannel();
             channels.register(clipChannel);
-            ((JComponent) canvas.getDisplay()).addFocusListener(clipChannel);
+            if (canvas.getDisplay() instanceof java.awt.Component component) {
+                component.addFocusListener(clipChannel);
+            }
             logger.info("剪贴板同步通道已注册");
         } catch (RdesktopException e) {
             logger.log(Level.WARNING, "注册剪贴板通道失败: " + e.getMessage());
@@ -515,6 +524,7 @@ public class RdpClient {
     private void notifyDisconnected(String reason) {
         connected = false;
         shutdownSoundChannel();
+        frontend.disposeCanvas(canvas);
         if (disconnectNotified.compareAndSet(false, true) && onDisconnected != null) {
             onDisconnected.accept(reason);
         }
@@ -577,7 +587,7 @@ public class RdpClient {
             // 重新创建画布
             long attemptId = beginAttempt();
             EmbeddedContext context = new EmbeddedContext(attemptId, state);
-            canvas = new RdesktopCanvas(context, state);
+            canvas = createFrontendCanvas(context, state);
             context.bindCanvas(canvas);
             state.setCanvas(canvas);
             configureDisplayFrameCallback(canvas, attemptId);
@@ -640,7 +650,7 @@ public class RdpClient {
             // 重新创建画布
             long attemptId = beginAttempt();
             EmbeddedContext context = new EmbeddedContext(attemptId, state);
-            canvas = new RdesktopCanvas(context, state);
+            canvas = createFrontendCanvas(context, state);
             context.bindCanvas(canvas);
             state.setCanvas(canvas);
             configureDisplayFrameCallback(canvas, attemptId);
@@ -869,7 +879,7 @@ public class RdpClient {
 
         long attemptId = beginAttempt();
         EmbeddedContext context = new EmbeddedContext(attemptId, state);
-        canvas = new RdesktopCanvas(context, state);
+        canvas = createFrontendCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
         configureDisplayFrameCallback(canvas, attemptId);
@@ -914,7 +924,7 @@ public class RdpClient {
 
         long attemptId = beginAttempt();
         EmbeddedContext context = new EmbeddedContext(attemptId, state);
-        canvas = new RdesktopCanvas(context, state);
+        canvas = createFrontendCanvas(context, state);
         context.bindCanvas(canvas);
         state.setCanvas(canvas);
         configureDisplayFrameCallback(canvas, attemptId);
@@ -1062,11 +1072,7 @@ public class RdpClient {
     public void releaseRemoteModifierKeys() {
         RdesktopCanvas currentCanvas = canvas;
         if (currentCanvas != null) {
-            if (javax.swing.SwingUtilities.isEventDispatchThread()) {
-                currentCanvas.lostFocus();
-            } else {
-                javax.swing.SwingUtilities.invokeLater(currentCanvas::lostFocus);
-            }
+            frontend.executeOnUiThread(currentCanvas::lostFocus);
         }
     }
 
@@ -1094,12 +1100,9 @@ public class RdpClient {
     }
 
     private void configureDisplayFrameCallback(RdesktopCanvas targetCanvas, long attemptId) {
-        if (targetCanvas.getDisplay() instanceof WrappedImage display) {
-            // Drawing orders, legacy bitmap updates and RDPGFX all repaint the
-            // backing component after pixels have been committed. This is the
-            // common fallback for servers whose first frame is not a bitmap PDU.
-            display.setFirstRemoteUpdateListener(() -> notifyFirstFrame(attemptId));
-        }
+        // Drawing orders, legacy bitmap updates and RDPGFX all repaint after
+        // pixels have been committed, independently of the chosen UI toolkit.
+        targetCanvas.getDisplay().setFirstRemoteUpdateListener(() -> notifyFirstFrame(attemptId));
     }
 
     private void notifyFirstFrame(long attemptId) {
@@ -1118,7 +1121,7 @@ public class RdpClient {
      * 获取渲染画布的JComponent（仅在onConnected回调后才有效）
      */
     public JComponent getDisplayComponent() {
-        return canvas != null ? (JComponent) canvas.getDisplay() : null;
+        return canvas != null && canvas.getDisplay() instanceof JComponent component ? component : null;
     }
 
     /**
@@ -1145,14 +1148,34 @@ public class RdpClient {
             java.awt.event.KeyEvent event = new java.awt.event.KeyEvent(
                     component, id, System.currentTimeMillis(), modifiers, keyCode,
                     java.awt.event.KeyEvent.CHAR_UNDEFINED, keyLocation);
-            targetCanvas.getInput().dispatchKeyEvent(event);
+            if (targetCanvas.getInput() instanceof Input swingInput) {
+                swingInput.dispatchKeyEvent(event);
+            }
         };
-        if (SwingUtilities.isEventDispatchThread()) {
-            dispatch.run();
-        } else {
-            SwingUtilities.invokeLater(dispatch);
-        }
+        frontend.executeOnUiThread(dispatch);
         return true;
+    }
+
+    /** Re-send the host toggle-key state after the desktop/focus is usable. */
+    public void synchronizeKeyboardState() {
+        if (!connected) {
+            return;
+        }
+        RdesktopCanvas targetCanvas = canvas;
+        if (targetCanvas == null) {
+            return;
+        }
+        Runnable synchronize = () -> {
+            if (connected && canvas == targetCanvas && targetCanvas.getInput() != null) {
+                targetCanvas.getInput().synchronizeLockKeys();
+            }
+        };
+        frontend.executeOnUiThread(synchronize);
+    }
+
+    private RdesktopCanvas createFrontendCanvas(IContext context, State state) {
+        frontend.disposeCanvas(canvas);
+        return frontend.createCanvas(context, state);
     }
 
     /**

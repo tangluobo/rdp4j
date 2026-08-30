@@ -69,7 +69,7 @@ public class RdesktopFrame extends Frame implements IContext {
 		menu = new RdpMenu(this);
 		setMenuBar(menu);
 		canvas = new RdesktopCanvas(this, state);
-		canvas.getDisplay().addMouseListener(new MouseAdapter() {
+		((JComponent) canvas.getDisplay()).addMouseListener(new MouseAdapter() {
 			@Override
 			public void mousePressed(MouseEvent e) {
 				if (e.getY() != 0) {

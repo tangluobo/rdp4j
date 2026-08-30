@@ -14,6 +14,7 @@
 package com.tangluobo.rdp4j.graphics;
 
 import java.awt.AWTEvent;
+import java.awt.AWTException;
 import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Graphics;
@@ -40,6 +41,7 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	private IndexColorModel cm = null;
 	private volatile Consumer<RdpCursor> cursorListener;
 	private volatile Runnable firstRemoteUpdateListener;
+	private volatile java.awt.Robot pointerRobot;
 
 	public WrappedImage(int width, int height, int imgType) {
 		bi = new BufferedImage(width, height, imgType);
@@ -167,6 +169,26 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	}
 
 	@Override
+	public void movePointer(int x, int y) {
+		java.awt.EventQueue.invokeLater(() -> {
+			if (!isShowing()) {
+				return;
+			}
+			try {
+				java.awt.Robot robot = pointerRobot;
+				if (robot == null) {
+					robot = new java.awt.Robot();
+					pointerRobot = robot;
+				}
+				Point origin = getLocationOnScreen();
+				robot.mouseMove(origin.x + x, origin.y + y);
+			} catch (AWTException | IllegalStateException e) {
+				logger.debug("Unable to apply server pointer position", e);
+			}
+		});
+	}
+
+	@Override
 	public void setCursor(RdpCursor cursor) {
 		setCursor(cursor == null ? null : ((AWTRdpCursor) cursor).getCursor());
 		Consumer<RdpCursor> listener = cursorListener;
@@ -188,6 +210,7 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 	 * Registers a one-shot callback for the first repaint requested after remote
 	 * pixels or drawing orders have been committed to this backing image.
 	 */
+	@Override
 	public void setFirstRemoteUpdateListener(Runnable listener) {
 		this.firstRemoteUpdateListener = listener;
 	}
@@ -284,8 +307,4 @@ public class WrappedImage extends JComponent implements Display, Scrollable {
 		}
 	}
 
-	@Override
-	public boolean getLockingKeyState(int vk) {
-		return getToolkit().getLockingKeyState(vk);
-	}
 }

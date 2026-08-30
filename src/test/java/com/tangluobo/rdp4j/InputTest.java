@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
+import java.awt.event.KeyEvent;
 import java.io.IOException;
 
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,13 @@ class InputTest {
                 Input.toggleFlags(false, true, false));
         assertEquals(Input.TS_SYNC_CAPS_LOCK | Input.TS_SYNC_NUM_LOCK | Input.TS_SYNC_SCROLL_LOCK,
                 Input.toggleFlags(true, true, true));
+    }
+
+    @Test
+    void recognizesNavigationCodesOnlyWhenTheyCameFromThePhysicalNumpad() {
+        assertTrue(Input.isPhysicalNumpadKey(KeyEvent.VK_END, KeyEvent.KEY_LOCATION_NUMPAD));
+        assertFalse(Input.isPhysicalNumpadKey(KeyEvent.VK_END, KeyEvent.KEY_LOCATION_STANDARD));
+        assertFalse(Input.isPhysicalNumpadKey(KeyEvent.VK_NUM_LOCK, KeyEvent.KEY_LOCATION_NUMPAD));
     }
 
     private static final class RecordingDisplay extends WrappedImage {

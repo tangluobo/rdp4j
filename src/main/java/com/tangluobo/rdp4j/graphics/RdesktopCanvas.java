@@ -13,7 +13,6 @@ import java.awt.Graphics;
 import java.awt.Image;
 import java.awt.Point;
 import java.awt.Rectangle;
-import java.awt.Robot;
 import java.awt.image.BufferedImage;
 import java.awt.image.IndexColorModel;
 
@@ -24,6 +23,7 @@ import com.tangluobo.rdp4j.Cache;
 import com.tangluobo.rdp4j.IContext;
 import com.tangluobo.rdp4j.IContext.ReadyType;
 import com.tangluobo.rdp4j.Input;
+import com.tangluobo.rdp4j.RdpInput;
 import com.tangluobo.rdp4j.Packet;
 import com.tangluobo.rdp4j.RdesktopException;
 import com.tangluobo.rdp4j.State;
@@ -67,12 +67,11 @@ public class RdesktopCanvas {
 	private int lastLoggedCursorHeight = -1;
 	private int lastLoggedCursorBpp = -1;
 	// unsetBusyCursor
-	private Input input = null;
+	private RdpInput input = null;
 	private int left = 0;
 	// Graphics backstore_graphics;
 	private Cursor previous_cursor = null; // for setBusyCursor and
 	private int right = 0;
-	private Robot robot = null;
 	private RasterOp rop = null;
 	private State state;
 	// protected int[] backstore_int = null;
@@ -100,6 +99,10 @@ public class RdesktopCanvas {
 	 * @param backstore backing store
 	 */
 	public RdesktopCanvas(IContext context, State state, Display backstore) {
+		this(context, state, backstore, true);
+	}
+
+	public RdesktopCanvas(IContext context, State state, Display backstore, boolean createSwingInput) {
 		super();
 		this.context = context;
 		this.state = state;
@@ -116,7 +119,9 @@ public class RdesktopCanvas {
 		// now do input listeners in registerCommLayer() / registerKeyboard()
 		backstore.init(this);
 		state.setCanvas(this);
-		input = new Input(context, state, this);
+		if (createSwingInput) {
+			input = new Input(context, state, this);
+		}
 	}
 
 	public void backingStoreResize(int width, int height, boolean clientInitiated) {
@@ -913,8 +918,15 @@ public class RdesktopCanvas {
 	 * 
 	 * @return input
 	 */
-	public Input getInput() {
+	public RdpInput getInput() {
 		return (input);
+	}
+
+	public void setInput(RdpInput input) {
+		if (this.input != null) {
+			throw new IllegalStateException("RDP input is already configured");
+		}
+		this.input = input;
 	}
 
 	/**
@@ -926,11 +938,7 @@ public class RdesktopCanvas {
 	}
 
 	public void movePointer(int x, int y) {
-		Point p = backstore.getLocationOnScreen();
-		x = x + p.x;
-		y = y + p.y;
-		if (robot != null)
-			robot.mouseMove(x, y);
+		backstore.movePointer(x, y);
 	}
 
 	/**
@@ -1103,7 +1111,7 @@ public class RdesktopCanvas {
 	 * @param type type
 	 */
 	public void triggerReady(ReadyType type) {
-		if(type == ReadyType.INPUT) {
+		if(type == ReadyType.INPUT && input != null) {
 			input.triggerReadyToSend();
 		}
 		else

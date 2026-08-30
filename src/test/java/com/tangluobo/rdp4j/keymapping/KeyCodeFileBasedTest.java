@@ -119,6 +119,37 @@ class KeyCodeFileBasedTest {
         }
     }
 
+    @Test
+    void numLockOffNavigationCodesStillUsePhysicalKeypadScanCodes() throws Exception {
+        KeyCode_FileBased keymap = loadUsKeymap();
+        Canvas component = new Canvas();
+        int[] keyCodes = {
+                KeyEvent.VK_INSERT, KeyEvent.VK_END, KeyEvent.VK_DOWN, KeyEvent.VK_PAGE_DOWN,
+                KeyEvent.VK_LEFT, KeyEvent.VK_CLEAR, KeyEvent.VK_RIGHT, KeyEvent.VK_HOME,
+                KeyEvent.VK_UP, KeyEvent.VK_PAGE_UP, KeyEvent.VK_DELETE
+        };
+        int[] scanCodes = { 0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49, 0x53 };
+
+        for (int i = 0; i < keyCodes.length; i++) {
+            String press = keymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_PRESSED,
+                    keyCodes[i], KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_NUMPAD));
+            String release = keymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_RELEASED,
+                    keyCodes[i], KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_NUMPAD));
+            assertStroke(press, scanCodes[i], KeyCode_FileBased.DOWN);
+            assertStroke(release, scanCodes[i], KeyCode_FileBased.UP);
+        }
+
+        assertStroke(keymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_PRESSED,
+                KeyEvent.VK_ENTER, KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_NUMPAD)),
+                0x1c | KeyCode_FileBased.SCANCODE_EXTENDED, KeyCode_FileBased.DOWN);
+
+        // The separate navigation cluster must remain extended.
+        KeyCode_FileBased navigationKeymap = loadUsKeymap();
+        assertStroke(navigationKeymap.getKeyStrokes(keyEvent(component, KeyEvent.KEY_PRESSED,
+                KeyEvent.VK_END, KeyEvent.CHAR_UNDEFINED, KeyEvent.KEY_LOCATION_STANDARD)),
+                0x4f | KeyCode_FileBased.SCANCODE_EXTENDED, KeyCode_FileBased.DOWN);
+    }
+
     private static KeyCode_FileBased loadUsKeymap() throws Exception {
         Options options = new Options();
         URL url = KeyCodeFileBasedTest.class.getResource("/keymaps/en-us");

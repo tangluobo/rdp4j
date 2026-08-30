@@ -353,12 +353,21 @@ final class DrdynvcChannel extends VChannel {
                 break;
             case MOUSE_CURSOR_UPDATE_POSITION:
                 require(payload, 4, 4, "MS-RDPEMSC pointer position");
-                // The local pointer already follows local input. Warping it for each
-                // echoed server position causes visible jumps and click displacement.
+                // Nested VM consoles use server-side pointer warps to keep a
+                // relative mouse away from the host window edges. Ignoring this
+                // update leaves the local pointer stuck on a resize border.
+                state.getCanvas().movePointer(u16(payload, 4), u16(payload, 6));
                 break;
             case MOUSE_CURSOR_UPDATE_CACHED:
                 require(payload, 4, 2, "MS-RDPEMSC cached pointer");
-                displayCursor(state.getCache().getCursor(u16(payload, 4)));
+                int cacheIndex = u16(payload, 4);
+                try {
+                    displayCursor(state.getCache().getCursor(cacheIndex));
+                } catch (RdesktopException e) {
+                    logger.warning("rdpemsc: missing cached cursor " + cacheIndex
+                            + "; restoring platform default");
+                    displayCursor(null);
+                }
                 break;
             case MOUSE_CURSOR_UPDATE_POINTER:
                 processMouseCursorPointer(payload, false);

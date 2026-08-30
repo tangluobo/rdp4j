@@ -197,7 +197,13 @@ public class RdpPatch extends Rdp {
             case 6: // default pointer
                 process_default_system_pointer_pdu();
                 break;
-            case 8: break; // pointer position; local Swing cursor position is authoritative
+            case 8: // pointer position
+                if (next - data.getPosition() >= 4) {
+                    int x = data.getLittleEndian16();
+                    int y = data.getLittleEndian16();
+                    stateRef.getCanvas().movePointer(x, y);
+                }
+                break;
             case 9: process_colour_pointer_pdu(data); break;
             case 10: process_cached_pointer_pdu(data); break;
             case 11: process_colour_pointer_pdu_new(data); break;

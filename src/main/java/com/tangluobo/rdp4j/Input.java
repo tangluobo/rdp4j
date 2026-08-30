@@ -33,7 +33,7 @@ import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
 import com.tangluobo.rdp4j.keymapping.KeyCode;
 import com.tangluobo.rdp4j.keymapping.KeyCode_FileBased;
 
-public class Input {
+public class Input implements RdpInput {
 	protected static final int KBD_FLAG_DOWN = 0x4000;
 	protected static final int KBD_FLAG_EXT = 0x0100;
 	// QUIET flag is actually as below (not 0x1000 as in rdesktop)
@@ -75,6 +75,7 @@ public class Input {
 	protected boolean numLockOn = false;
 	protected Vector pressedKeys;
 	protected boolean scrollLockOn = false;
+	private volatile boolean lateLockKeySynchronizationPending;
 	protected boolean serverAltDown = false;
 	private boolean remoteLeftShiftDown = false;
 	private boolean remoteRightShiftDown = false;
@@ -109,14 +110,17 @@ public class Input {
 	 * Add all relevant input listeners to the canvas
 	 */
 	public void addInputListeners() {
+		if (!(canvas.getDisplay() instanceof java.awt.Component component)) {
+			return;
+		}
 		if (mouseListener == null) {
-			canvas.getDisplay().addMouseListener(mouseListener = new RdesktopMouseAdapter());
-			canvas.getDisplay().addMouseMotionListener(mouseMotionListener = new RdesktopMouseMotionAdapter());
-			canvas.getDisplay().addKeyListener(keyListener = new RdesktopKeyAdapter());
+			component.addMouseListener(mouseListener = new RdesktopMouseAdapter());
+			component.addMouseMotionListener(mouseMotionListener = new RdesktopMouseMotionAdapter());
+			component.addKeyListener(keyListener = new RdesktopKeyAdapter());
 		}
 		// SwingNode嵌入模式没有RdesktopFrame替画布转发窗口焦点事件。
 		// 直接监听显示组件，失焦时释放远端修饰键。
-		if (focusListener == null && canvas.getDisplay() instanceof java.awt.Component) {
+		if (focusListener == null) {
 			focusListener = new FocusAdapter() {
 				@Override
 				public void focusGained(FocusEvent e) {
@@ -128,15 +132,11 @@ public class Input {
 					lostFocus();
 				}
 			};
-			((java.awt.Component) canvas.getDisplay()).addFocusListener(focusListener);
+			component.addFocusListener(focusListener);
 		}
-		if (canvas.getDisplay() instanceof java.awt.Component component) {
-			// RDP必须把物理按键交给远端键盘布局/输入法处理。
-			// 若在此启用AWT输入法，本地IME会先吞掉按键，并产生
-			// InputMethodEvent，导致输入内容取决于本地而不是远端IME。
-			component.enableInputMethods(false);
-		}
-		canvas.getDisplay().addMouseWheelListener(new RdesktopMouseWheelAdapter());
+		// RDP必须把物理按键交给远端键盘布局/输入法处理。
+		component.enableInputMethods(false);
+		component.addMouseWheelListener(new RdesktopMouseWheelAdapter());
 	}
 
 	/**
@@ -172,7 +172,7 @@ public class Input {
 		// Re-check the remote modifier state before the next real input event.
 		remoteShiftStateKnown = false;
 		if (state.getRdp() != null) {
-			doLockKeys(); // ensure lock key states are correct
+			synchronizeLockKeys();
 		}
 	}
 
@@ -416,18 +416,26 @@ public class Input {
 	 * Remove all relevant input listeners to the canvas
 	 */
 	public void removeInputListeners() {
+		if (!(canvas.getDisplay() instanceof java.awt.Component component)) {
+			return;
+		}
 		if (mouseListener != null) {
-			canvas.getDisplay().removeMouseListener(mouseListener);
-			canvas.getDisplay().removeMouseMotionListener(mouseMotionListener);
-			canvas.getDisplay().removeKeyListener(keyListener);
+			component.removeMouseListener(mouseListener);
+			component.removeMouseMotionListener(mouseMotionListener);
+			component.removeKeyListener(keyListener);
 			mouseListener = null;
 			mouseMotionListener = null;
 			keyListener = null;
 		}
-		if (focusListener != null && canvas.getDisplay() instanceof java.awt.Component) {
-			((java.awt.Component) canvas.getDisplay()).removeFocusListener(focusListener);
+		if (focusListener != null) {
+			component.removeFocusListener(focusListener);
 			focusListener = null;
 		}
+	}
+
+	@Override
+	public void dispose() {
+		removeInputListeners();
 	}
 
 	/**
@@ -601,24 +609,35 @@ public class Input {
 	public void triggerReadyToSend() {
 		logger.info("Input ready to send");
 		remoteShiftStateKnown = false;
+		synchronizeLockKeys();
+		// INPUT-ready may arrive before the final desktop becomes active. Keep a
+		// one-shot retry for the first physical keypad key if focus/first-frame did
+		// not already perform the late synchronization.
+		lateLockKeySynchronizationPending = true;
+	}
+
+	public void synchronizeLockKeys() {
 		try {
-			doLockKeys(); // synchronize local toggle-key state without toggling a reused session
+			doLockKeys();
+			lateLockKeySynchronizationPending = false;
 		} catch (UnsupportedOperationException e) {
+			lateLockKeySynchronizationPending = false;
 			// Headless/remote Java runtimes may not expose the host lock-key
-			// state. This synchronization is optional and must not abort the RDP
-			// activation sequence.
-			logger.warn("Local lock-key state is unavailable; skipping initial keyboard LED synchronization");
+			// state. This synchronization is optional and must not abort RDP.
+			logger.warn("Local lock-key state is unavailable; skipping keyboard LED synchronization");
 		}
 	}
 
 	protected void doLockKeys() {
-		capsLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_CAPS_LOCK);
-		numLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_NUM_LOCK);
-		scrollLockOn = canvas.getDisplay().getLockingKeyState(KeyEvent.VK_SCROLL_LOCK);
-		int toggleFlags = toggleFlags(capsLockOn, numLockOn, scrollLockOn);
-		if (logger.isDebugEnabled()) {
-			logger.debug("Synchronizing keyboard toggle flags: 0x" + Integer.toHexString(toggleFlags));
+		if (!(canvas.getDisplay() instanceof java.awt.Component component)) {
+			throw new UnsupportedOperationException("AWT lock-key state is unavailable");
 		}
+		capsLockOn = component.getToolkit().getLockingKeyState(KeyEvent.VK_CAPS_LOCK);
+		numLockOn = component.getToolkit().getLockingKeyState(KeyEvent.VK_NUM_LOCK);
+		scrollLockOn = component.getToolkit().getLockingKeyState(KeyEvent.VK_SCROLL_LOCK);
+		int toggleFlags = toggleFlags(capsLockOn, numLockOn, scrollLockOn);
+		logger.info("Synchronizing keyboard toggle flags: 0x" + Integer.toHexString(toggleFlags)
+				+ " (caps=" + capsLockOn + ", num=" + numLockOn + ", scroll=" + scrollLockOn + ")");
 		// TS_SYNC_EVENT sets the server state absolutely and also releases any
 		// keys it still considers down. Simulating lock-key presses is incorrect
 		// for redirected/reconnected sessions because their initial state is not
@@ -632,6 +651,10 @@ public class Input {
 		if (numLock) flags |= TS_SYNC_NUM_LOCK;
 		if (capsLock) flags |= TS_SYNC_CAPS_LOCK;
 		return flags;
+	}
+
+	static boolean isPhysicalNumpadKey(int keyCode, int keyLocation) {
+		return keyLocation == KeyEvent.KEY_LOCATION_NUMPAD && keyCode != KeyEvent.VK_NUM_LOCK;
 	}
 
 	/**
@@ -696,6 +719,10 @@ public class Input {
 		 */
 		@Override
 		public void keyPressed(KeyEvent e) {
+			if (lateLockKeySynchronizationPending
+					&& isPhysicalNumpadKey(e.getKeyCode(), e.getKeyLocation())) {
+				synchronizeLockKeys();
+			}
 			reconcileRemoteShift(e.isShiftDown());
 			lastKeyEvent = e;
 			modifiersValid = true;

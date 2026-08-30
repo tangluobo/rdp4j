@@ -641,9 +641,10 @@ public class Rdp implements Layer<Layer<?>> {
 		try {
 			state.getCanvas().getDisplay().setCursor(state.getCache().getCursor(cache_idx));
 		} catch (RdesktopException e) {
-			// A server can reference its default pointer before sending the image.
-			// Keep the platform cursor instead of treating this as a transport error.
-			logger.warn("Ignoring missing cached cursor {}", cache_idx);
+			// Cursor updates can overtake their cache image on redirected/nested
+			// sessions. Do not leave the previous resize cursor stuck on screen.
+			logger.warn("Missing cached cursor {}; restoring platform default", cache_idx);
+			state.getCanvas().getDisplay().setCursor(null);
 		} catch (HeadlessException e) {
 			logger.debug("Cursor display is unavailable in headless mode");
 		}
