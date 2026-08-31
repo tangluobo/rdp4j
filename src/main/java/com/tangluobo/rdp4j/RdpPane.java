@@ -205,7 +205,14 @@ public class RdpPane extends BorderPane {
         scrollPane.setPannable(false);
         scrollPane.setFitToWidth(false);
         scrollPane.setFitToHeight(false);
-        scrollPane.setStyle("-fx-background: black; -fx-background-color: black;");
+        // JavaFX's default ScrollPane skin reserves a one-pixel frame.  In
+        // full-screen that turns a native 1920x1080 desktop into a roughly
+        // 1918x1078 viewport and forces the whole raster through a fractional
+        // scale, which makes remote text look soft even with ImageView
+        // smoothing disabled.
+        scrollPane.setStyle("-fx-background: black; -fx-background-color: black;"
+                + " -fx-padding: 0; -fx-background-insets: 0;"
+                + " -fx-border-width: 0; -fx-border-insets: 0;");
         ScrollPane.ScrollBarPolicy initialPolicy = windowScrollBarsSuppressed
                 ? ScrollPane.ScrollBarPolicy.NEVER : ScrollPane.ScrollBarPolicy.AS_NEEDED;
         scrollPane.setVbarPolicy(initialPolicy);
@@ -422,7 +429,10 @@ public class RdpPane extends BorderPane {
                 activateNativeFullScreenKeyboard();
             }
             showExitBar("initial");
-            Platform.runLater(() -> logControlBarState("entered"));
+            Platform.runLater(() -> {
+                logControlBarState("entered");
+                logFullScreenDisplayGeometry("entered");
+            });
             requestRdpFocus();
         });
     }
@@ -516,6 +526,7 @@ public class RdpPane extends BorderPane {
                 restoreFullScreenOnFocus = false;
                 logger.info(() -> "[FULLSCREEN_STATE] state=restored-after-focus, host=" + host);
                 showExitBar("focus-restored");
+                Platform.runLater(() -> logFullScreenDisplayGeometry("focus-restored"));
                 requestRdpFocus();
             } else if (!stage.isFocused()) {
                 restoreFullScreenOnFocus = true;
@@ -712,18 +723,57 @@ public class RdpPane extends BorderPane {
     private void applyFullScreenPresentation(boolean fullScreen) {
         frontend.setScaleToFit(fullScreen);
         ScrollPane scrollPane = desktopScrollPane;
-        if (scrollPane == null) {
+        Node view = desktopView;
+        if (scrollPane == null || view == null) {
             return;
         }
-        scrollPane.setFitToWidth(fullScreen);
-        scrollPane.setFitToHeight(fullScreen);
         if (fullScreen) {
+            // Do not leave the desktop inside ScrollPane while scaling it to
+            // the full-screen stage.  Even with hidden scroll bars the
+            // ScrollPane skin can reserve border/inset pixels, producing a
+            // fractional full-frame scale and visibly blurred text.
+            if (scrollPane.getContent() == view) {
+                scrollPane.setContent(null);
+            }
+            if (getCenter() != view) {
+                setCenter(view);
+            }
+            scrollPane.setFitToWidth(false);
+            scrollPane.setFitToHeight(false);
             scrollPane.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
             scrollPane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         } else {
+            if (getCenter() == view) {
+                setCenter(null);
+            }
+            if (scrollPane.getContent() != view) {
+                scrollPane.setContent(view);
+            }
+            if (getCenter() != scrollPane) {
+                setCenter(scrollPane);
+            }
+            scrollPane.setFitToWidth(false);
+            scrollPane.setFitToHeight(false);
             scrollPane.setVbarPolicy(verticalPolicyBeforeFullScreen);
             scrollPane.setHbarPolicy(horizontalPolicyBeforeFullScreen);
         }
+    }
+
+    private void logFullScreenDisplayGeometry(String state) {
+        Stage stage = fullScreenStage;
+        FxRdpDisplay display = frontend.getDisplay();
+        Node view = desktopView;
+        if (stage == null || display == null || view == null) {
+            return;
+        }
+        Bounds viewBounds = view.getLayoutBounds();
+        Bounds imageBounds = display.getImageView().getBoundsInParent();
+        logger.info(() -> "[FULLSCREEN_DISPLAY] state=" + state
+                + ", host=" + host
+                + ", remote=" + display.getDisplayWidth() + "x" + display.getDisplayHeight()
+                + ", view=" + viewBounds.getWidth() + "x" + viewBounds.getHeight()
+                + ", image=" + imageBounds.getWidth() + "x" + imageBounds.getHeight()
+                + ", outputScale=" + stage.getOutputScaleX() + "x" + stage.getOutputScaleY());
     }
 
     private Rectangle2D positionOnOwnerScreen(Stage stage) {
