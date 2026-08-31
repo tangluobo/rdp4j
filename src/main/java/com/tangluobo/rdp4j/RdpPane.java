@@ -1,5 +1,6 @@
 package com.tangluobo.rdp4j;
 
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -416,6 +417,11 @@ public class RdpPane extends BorderPane {
             event.consume();
             exitFullScreen();
         });
+        // A Stage must be shown before JavaFX can complete its native
+        // full-screen transition.  Keep that short-lived window transparent;
+        // otherwise the control bar is painted once against the tiny initial
+        // scene at the top-left before the full-screen layout centres it.
+        stage.setOpacity(0);
         stage.show();
         startFullScreenEdgeMonitor();
         Platform.runLater(() -> {
@@ -430,6 +436,12 @@ public class RdpPane extends BorderPane {
             }
             showExitBar("initial");
             Platform.runLater(() -> {
+                if (fullScreenStage != stage) {
+                    return;
+                }
+                fullScreenRoot.applyCss();
+                fullScreenRoot.layout();
+                stage.setOpacity(1);
                 logControlBarState("entered");
                 logFullScreenDisplayGeometry("entered");
             });
@@ -777,29 +789,81 @@ public class RdpPane extends BorderPane {
     }
 
     private Rectangle2D positionOnOwnerScreen(Stage stage) {
-        Rectangle2D target = Screen.getPrimary().getBounds();
-        try {
-            if (ownerTab.getTabPane() == null || ownerTab.getTabPane().getScene() == null) {
-                stage.setX(target.getMinX());
-                stage.setY(target.getMinY());
-                return target;
-            }
-            Window owner = ownerTab.getTabPane().getScene().getWindow();
-            if (owner == null) {
-                stage.setX(target.getMinX());
-                stage.setY(target.getMinY());
-                return target;
-            }
-            Rectangle2D probe = new Rectangle2D(owner.getX(), owner.getY(), 1, 1);
-            for (Screen screen : Screen.getScreensForRectangle(probe)) {
-                target = screen.getBounds();
-                break;
-            }
-        } catch (RuntimeException ignored) {
+        Window owner = null;
+        if (ownerTab != null && ownerTab.getTabPane() != null
+                && ownerTab.getTabPane().getScene() != null) {
+            owner = ownerTab.getTabPane().getScene().getWindow();
         }
+        Rectangle2D target = getScreenBoundsForWindow(owner);
+        // Give the still-transparent native window the target monitor's full
+        // bounds before requesting full-screen.  On Windows, X/Y alone are not
+        // always enough when the Stage has not completed its first layout;
+        // an initial default-sized window can otherwise select the primary
+        // monitor regardless of its requested origin.
         stage.setX(target.getMinX());
         stage.setY(target.getMinY());
+        stage.setWidth(target.getWidth());
+        stage.setHeight(target.getHeight());
+        Window targetOwner = owner;
+        logger.info(() -> "[FULLSCREEN_STATE] state=target-screen, host=" + host
+                + ", owner=" + formatWindowBounds(targetOwner)
+                + ", target=" + target);
         return target;
+    }
+
+    /** Returns the monitor occupied by most of the supplied window. */
+    public static Rectangle2D getScreenBoundsForWindow(Window window) {
+        Rectangle2D fallback = Screen.getPrimary().getBounds();
+        if (window == null) {
+            return fallback;
+        }
+        Rectangle2D windowBounds = new Rectangle2D(window.getX(), window.getY(),
+                Math.max(1, window.getWidth()), Math.max(1, window.getHeight()));
+        List<Rectangle2D> screens = Screen.getScreens().stream()
+                .map(Screen::getBounds)
+                .toList();
+        return selectScreenBounds(windowBounds, screens, fallback);
+    }
+
+    static Rectangle2D selectScreenBounds(Rectangle2D windowBounds,
+                                           List<Rectangle2D> screens,
+                                           Rectangle2D fallback) {
+        if (windowBounds == null || screens == null || screens.isEmpty()) {
+            return fallback;
+        }
+        double centerX = windowBounds.getMinX() + windowBounds.getWidth() / 2;
+        double centerY = windowBounds.getMinY() + windowBounds.getHeight() / 2;
+        Rectangle2D best = null;
+        double bestArea = 0;
+        boolean bestContainsCenter = false;
+        for (Rectangle2D screen : screens) {
+            if (screen == null) {
+                continue;
+            }
+            double overlapWidth = Math.max(0,
+                    Math.min(windowBounds.getMaxX(), screen.getMaxX())
+                            - Math.max(windowBounds.getMinX(), screen.getMinX()));
+            double overlapHeight = Math.max(0,
+                    Math.min(windowBounds.getMaxY(), screen.getMaxY())
+                            - Math.max(windowBounds.getMinY(), screen.getMinY()));
+            double area = overlapWidth * overlapHeight;
+            boolean containsCenter = screen.contains(centerX, centerY);
+            if (area > bestArea
+                    || (area == bestArea && area > 0 && containsCenter && !bestContainsCenter)) {
+                best = screen;
+                bestArea = area;
+                bestContainsCenter = containsCenter;
+            }
+        }
+        return best != null ? best : fallback;
+    }
+
+    private static String formatWindowBounds(Window window) {
+        if (window == null) {
+            return "none";
+        }
+        return window.getX() + "," + window.getY()
+                + " " + window.getWidth() + "x" + window.getHeight();
     }
 
     private void showExitBar() {

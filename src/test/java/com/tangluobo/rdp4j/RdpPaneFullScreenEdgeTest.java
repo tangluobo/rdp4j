@@ -1,5 +1,8 @@
 package com.tangluobo.rdp4j;
 
+import java.util.List;
+
+import javafx.geometry.Rectangle2D;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -7,6 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 class RdpPaneFullScreenEdgeTest {
+
+    private static final Rectangle2D PRIMARY = new Rectangle2D(0, 0, 1920, 1080);
+    private static final Rectangle2D SECONDARY = new Rectangle2D(1920, 0, 1920, 1080);
 
     @Test
     void recognizesEntireTopEdgeTriggerArea() {
@@ -103,5 +109,29 @@ class RdpPaneFullScreenEdgeTest {
         assertEquals(44, RdpPane.controlBarOffsetForSession("RDP-Tcp#7", null));
         assertEquals(44, RdpPane.controlBarOffsetForSession("rdp-tcp#2", null));
         assertEquals(44, RdpPane.controlBarOffsetForSession(null, "xrdp-session"));
+    }
+
+    @Test
+    void selectsMonitorWithLargestWindowOverlap() {
+        Rectangle2D mostlySecondary = new Rectangle2D(1700, 100, 1000, 800);
+
+        assertEquals(SECONDARY, RdpPane.selectScreenBounds(mostlySecondary,
+                List.of(PRIMARY, SECONDARY), PRIMARY));
+    }
+
+    @Test
+    void selectsSecondaryMonitorForWindowExactlyOnItsOrigin() {
+        Rectangle2D secondaryWindow = new Rectangle2D(1920, 0, 1280, 720);
+
+        assertEquals(SECONDARY, RdpPane.selectScreenBounds(secondaryWindow,
+                List.of(PRIMARY, SECONDARY), PRIMARY));
+    }
+
+    @Test
+    void fallsBackWhenWindowDoesNotIntersectAnyMonitor() {
+        Rectangle2D offScreen = new Rectangle2D(-10000, -10000, 800, 600);
+
+        assertEquals(PRIMARY, RdpPane.selectScreenBounds(offScreen,
+                List.of(PRIMARY, SECONDARY), PRIMARY));
     }
 }
