@@ -9,9 +9,9 @@ import org.junit.jupiter.api.Test;
 class RdpPaneFullScreenEdgeTest {
 
     @Test
-    void recognizesEntireFivePixelTopEdge() {
+    void recognizesEntireTopEdgeTriggerArea() {
         assertTrue(RdpPane.isAtFullScreenTopEdge(0, 0, 0, 0, 1920));
-        assertTrue(RdpPane.isAtFullScreenTopEdge(960, 5, 0, 0, 1920));
+        assertTrue(RdpPane.isAtFullScreenTopEdge(960, 12, 0, 0, 1920));
         assertTrue(RdpPane.isAtFullScreenTopEdge(-1, -1197, -1920, -1200, 1920));
     }
 
@@ -20,8 +20,48 @@ class RdpPaneFullScreenEdgeTest {
         assertFalse(RdpPane.isAtFullScreenTopEdge(-1, 2, 0, 0, 1920));
         assertFalse(RdpPane.isAtFullScreenTopEdge(1920, 2, 0, 0, 1920));
         assertFalse(RdpPane.isAtFullScreenTopEdge(20, -1, 0, 0, 1920));
-        assertFalse(RdpPane.isAtFullScreenTopEdge(20, 6, 0, 0, 1920));
+        assertFalse(RdpPane.isAtFullScreenTopEdge(20, 13, 0, 0, 1920));
         assertFalse(RdpPane.isAtFullScreenTopEdge(0, 0, 0, 0, 0));
+        assertFalse(RdpPane.isAtFullScreenTopEdge(Double.NaN, 0, 0, 0, 1920));
+    }
+
+    @Test
+    void recognizesSceneTopEdgeIndependentlyOfWindowCoordinates() {
+        assertTrue(RdpPane.isAtSceneTopEdge(0));
+        assertTrue(RdpPane.isAtSceneTopEdge(12));
+        assertFalse(RdpPane.isAtSceneTopEdge(-0.1));
+        assertFalse(RdpPane.isAtSceneTopEdge(12.1));
+        assertFalse(RdpPane.isAtSceneTopEdge(Double.NaN));
+    }
+
+    @Test
+    void mapsLocalTriggerHeightToRemoteDesktopCoordinates() {
+        assertTrue(RdpPane.isAtRemoteTopEdge(12, 1080, 1080));
+        assertTrue(RdpPane.isAtRemoteTopEdge(24, 2160, 1080));
+        assertFalse(RdpPane.isAtRemoteTopEdge(25, 2160, 1080));
+        assertFalse(RdpPane.isAtRemoteTopEdge(-1, 1080, 1080));
+        assertFalse(RdpPane.isAtRemoteTopEdge(0, 0, 1080));
+        assertFalse(RdpPane.isAtRemoteTopEdge(0, 1080, 0));
+    }
+
+    @Test
+    void hiddenControlBarLeavesThreePixelHoverHandle() {
+        assertEquals(-37, RdpPane.hiddenControlBarTranslateY(40));
+        assertEquals(0, RdpPane.hiddenControlBarTranslateY(3));
+        assertEquals(0, RdpPane.hiddenControlBarTranslateY(0));
+        assertEquals(0, RdpPane.hiddenControlBarTranslateY(Double.NaN));
+    }
+
+    @Test
+    void groupsEdgeDiagnosticsWithoutLoggingEveryMousePixel() {
+        assertEquals(0, RdpPane.edgeDiagnosticBand(0));
+        assertEquals(0, RdpPane.edgeDiagnosticBand(12));
+        assertEquals(1, RdpPane.edgeDiagnosticBand(13));
+        assertEquals(2, RdpPane.edgeDiagnosticBand(50));
+        assertEquals(3, RdpPane.edgeDiagnosticBand(100));
+        assertEquals(4, RdpPane.edgeDiagnosticBand(200));
+        assertEquals(Integer.MAX_VALUE, RdpPane.edgeDiagnosticBand(201));
+        assertEquals(Integer.MAX_VALUE, RdpPane.edgeDiagnosticBand(Double.NaN));
     }
 
     @Test

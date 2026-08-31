@@ -13,6 +13,7 @@ import java.nio.IntBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 
 import com.tangluobo.rdp4j.graphics.Display;
@@ -53,6 +54,7 @@ public final class FxRdpDisplay implements Display {
     private final AtomicBoolean cursorProbePending = new AtomicBoolean();
     private final StackPane view = new StackPane();
     private final ImageView imageView = new ImageView();
+    private final BiConsumer<Integer, Integer> serverPointerMovedListener;
     private final Deque<MovementProbe> movementProbes = new ArrayDeque<>();
     private final AnimationTimer movementProbeTimer = new AnimationTimer() {
         @Override
@@ -89,7 +91,14 @@ public final class FxRdpDisplay implements Display {
     private int dirtyBottom = -1;
 
     public FxRdpDisplay(int width, int height) {
+        this(width, height, null);
+    }
+
+    public FxRdpDisplay(int width, int height,
+                        BiConsumer<Integer, Integer> serverPointerMovedListener) {
         requireFxThread();
+        this.serverPointerMovedListener = serverPointerMovedListener == null
+                ? (x, y) -> { } : serverPointerMovedListener;
         bufferedImage = createImage(width, height);
         imageView.setFocusTraversable(true);
         imageView.setPreserveRatio(true);
@@ -325,6 +334,7 @@ public final class FxRdpDisplay implements Display {
             try {
                 int remoteX = clamp(x, 0, getDisplayWidth() - 1);
                 int remoteY = clamp(y, 0, getDisplayHeight() - 1);
+                serverPointerMovedListener.accept(remoteX, remoteY);
                 if (shouldHideForServerPointerPosition(hasSeenHiddenCursor, lastCursorMode)) {
                     // A server pointer-position PDU represents a programmatic
                     // pointer move, not an acknowledgement of ordinary client

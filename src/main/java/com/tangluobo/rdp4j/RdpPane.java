@@ -12,6 +12,7 @@ import javafx.animation.AnimationTimer;
 import javafx.animation.PauseTransition;
 import javafx.animation.TranslateTransition;
 import javafx.application.Platform;
+import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Rectangle2D;
@@ -47,9 +48,10 @@ import javafx.util.Duration;
 public class RdpPane extends BorderPane {
 
     private static final Logger logger = Logger.getLogger(RdpPane.class.getName());
-    private static final double FULL_SCREEN_TOP_EDGE_HEIGHT = 5;
+    private static final double FULL_SCREEN_TOP_EDGE_HEIGHT = 12;
+    private static final double CONTROL_BAR_HANDLE_HEIGHT = 3;
     private static final double NESTED_CONTROL_BAR_OFFSET = 44;
-    private static final long EDGE_POLL_INTERVAL_NANOS = 50_000_000L;
+    private static final long EDGE_POLL_INTERVAL_NANOS = 16_000_000L;
 
     private final FxRdpFrontend frontend = new FxRdpFrontend();
     private final RdpClient rdpClient = new RdpClient(frontend);
@@ -74,6 +76,10 @@ public class RdpPane extends BorderPane {
     private boolean exitBarPinned;
     private boolean fullScreenTransitioning;
     private double exitBarShownY;
+    private int bestSceneEdgeBand = Integer.MAX_VALUE;
+    private int bestLocalRemoteEdgeBand = Integer.MAX_VALUE;
+    private int bestServerRemoteEdgeBand = Integer.MAX_VALUE;
+    private int bestRobotEdgeBand = Integer.MAX_VALUE;
     private ScrollPane.ScrollBarPolicy verticalPolicyBeforeFullScreen = ScrollPane.ScrollBarPolicy.AS_NEEDED;
     private ScrollPane.ScrollBarPolicy horizontalPolicyBeforeFullScreen = ScrollPane.ScrollBarPolicy.AS_NEEDED;
 
@@ -85,6 +91,8 @@ public class RdpPane extends BorderPane {
     private volatile KeyCombination fullScreenKeys = KeyCombination.valueOf("Ctrl+Shift+Enter");
 
     public RdpPane() {
+        frontend.setPointerMovedListener(this::onRemotePointerMoved);
+        frontend.setServerPointerMovedListener(this::onServerPointerMoved);
         initializeUi();
     }
 
@@ -284,6 +292,7 @@ public class RdpPane extends BorderPane {
         }
         rdpClient.releaseRemoteModifierKeys();
         fullScreenTransitioning = true;
+        resetFullScreenEdgeDiagnostics();
         if (desktopScrollPane != null) {
             verticalPolicyBeforeFullScreen = desktopScrollPane.getVbarPolicy();
             horizontalPolicyBeforeFullScreen = desktopScrollPane.getHbarPolicy();
@@ -302,9 +311,13 @@ public class RdpPane extends BorderPane {
         fullScreenRoot = new StackPane(this, exitBar);
         fullScreenRoot.setStyle("-fx-background-color: black;");
         Scene scene = new Scene(fullScreenRoot, Color.BLACK);
-        scene.addEventFilter(MouseEvent.MOUSE_MOVED, event -> {
-            if (event.getSceneY() <= FULL_SCREEN_TOP_EDGE_HEIGHT) {
-                showExitBar();
+        // Observe every mouse event at scene level without consuming it. Some
+        // servers reposition the pointer or use a software cursor, so relying
+        // on MOUSE_MOVED from the remote image alone is not portable.
+        scene.addEventFilter(MouseEvent.ANY, event -> {
+            logCloserEdgeObservation("scene", event.getSceneY(), 0);
+            if (isAtSceneTopEdge(event.getSceneY())) {
+                showExitBar("scene");
             }
         });
 
@@ -333,7 +346,8 @@ public class RdpPane extends BorderPane {
             }
             stage.setFullScreen(true);
             fullScreenTransitioning = false;
-            showExitBar();
+            showExitBar("initial");
+            Platform.runLater(() -> logControlBarState("entered"));
             requestRdpFocus();
         });
     }
@@ -384,6 +398,7 @@ public class RdpPane extends BorderPane {
         bar.getChildren().addAll(pin, quality, title, minimize, exit, close);
         bar.setOnMouseEntered(event -> {
             if (hideExitBarTimer != null) hideExitBarTimer.stop();
+            showExitBar("handle");
         });
         bar.setOnMouseExited(event -> {
             if (!exitBarPinned && hideExitBarTimer != null) hideExitBarTimer.playFromStart();
@@ -463,28 +478,69 @@ public class RdpPane extends BorderPane {
     }
 
     private void showExitBar() {
+        showExitBar("internal");
+    }
+
+    private void showExitBar(String source) {
         if (exitBar == null) {
             return;
         }
+        boolean wasHidden = !exitBar.isVisible()
+                || Math.abs(exitBar.getTranslateY() - exitBarShownY) > 0.5;
         if (exitBarSlide != null) exitBarSlide.stop();
         exitBar.setVisible(true);
         exitBar.setTranslateY(exitBarShownY);
+        if (wasHidden) {
+            logControlBarState("shown-by-" + source);
+        }
         if (!exitBarPinned && hideExitBarTimer != null && !exitBar.isHover()) {
             hideExitBarTimer.playFromStart();
         }
     }
 
+    private void onRemotePointerMoved(int remoteX, int remoteY) {
+        onProtocolPointerMoved("rdp-local", remoteX, remoteY, false);
+    }
+
+    private void onServerPointerMoved(int remoteX, int remoteY) {
+        onProtocolPointerMoved("rdp-server", remoteX, remoteY, true);
+    }
+
+    private void onProtocolPointerMoved(String source, int remoteX, int remoteY,
+                                        boolean serverPointer) {
+        if (fullScreenStage == null) {
+            return;
+        }
+        FxRdpDisplay display = frontend.getDisplay();
+        if (display == null) {
+            return;
+        }
+        double renderedHeight = display.getImageView().getBoundsInParent().getHeight();
+        logCloserEdgeObservation(source, remoteY, serverPointer ? 2 : 1);
+        if (isAtRemoteTopEdge(remoteY, display.getDisplayHeight(), renderedHeight)) {
+            showExitBar(source + "(" + remoteX + "," + remoteY + ")");
+        }
+    }
+
     private void hideExitBar() {
-        if (exitBarPinned || exitBar == null || !exitBar.isVisible()) {
+        if (exitBarPinned || exitBar == null) {
             return;
         }
         if (exitBarSlide != null) exitBarSlide.stop();
         exitBarSlide = new TranslateTransition(Duration.millis(180), exitBar);
-        exitBarSlide.setToY(-(exitBar.getHeight() + 8));
-        exitBarSlide.setOnFinished(event -> {
-            if (exitBar != null) exitBar.setVisible(false);
-        });
+        // Keep a narrow, visible and pickable handle at the physical top
+        // centre. It can reveal the bar even when a legacy/software remote
+        // cursor path prevents scene-level edge coordinates from arriving.
+        exitBarSlide.setToY(hiddenControlBarTranslateY(exitBar.getHeight()));
+        exitBarSlide.setOnFinished(event -> logControlBarState("hidden"));
         exitBarSlide.play();
+    }
+
+    static double hiddenControlBarTranslateY(double barHeight) {
+        if (!Double.isFinite(barHeight) || barHeight <= CONTROL_BAR_HANDLE_HEIGHT) {
+            return 0;
+        }
+        return -(barHeight - CONTROL_BAR_HANDLE_HEIGHT);
     }
 
     private void startFullScreenEdgeMonitor() {
@@ -506,13 +562,95 @@ public class RdpPane extends BorderPane {
                 Stage stage = fullScreenStage;
                 if (stage == null || !stage.isShowing()) return;
                 var mouse = robot.getMousePosition();
+                Rectangle2D edgeBounds = resolveFullScreenEdgeBounds(stage);
+                logCloserEdgeObservation("robot", mouse.getY() - edgeBounds.getMinY(), 3);
                 if (isAtFullScreenTopEdge(mouse.getX(), mouse.getY(),
-                        stage.getX(), stage.getY(), stage.getWidth())) {
-                    showExitBar();
+                        edgeBounds.getMinX(), edgeBounds.getMinY(), edgeBounds.getWidth())) {
+                    showExitBar("robot");
                 }
             }
         };
         fullScreenEdgeMouseMonitor.start();
+    }
+
+    private void resetFullScreenEdgeDiagnostics() {
+        bestSceneEdgeBand = Integer.MAX_VALUE;
+        bestLocalRemoteEdgeBand = Integer.MAX_VALUE;
+        bestServerRemoteEdgeBand = Integer.MAX_VALUE;
+        bestRobotEdgeBand = Integer.MAX_VALUE;
+    }
+
+    private void logCloserEdgeObservation(String source, double y, int sourceIndex) {
+        int band = edgeDiagnosticBand(y);
+        int previous = switch (sourceIndex) {
+        case 0 -> bestSceneEdgeBand;
+        case 1 -> bestLocalRemoteEdgeBand;
+        case 2 -> bestServerRemoteEdgeBand;
+        default -> bestRobotEdgeBand;
+        };
+        if (band >= previous) {
+            return;
+        }
+        switch (sourceIndex) {
+        case 0 -> bestSceneEdgeBand = band;
+        case 1 -> bestLocalRemoteEdgeBand = band;
+        case 2 -> bestServerRemoteEdgeBand = band;
+        default -> bestRobotEdgeBand = band;
+        }
+        logger.info(() -> "[FULLSCREEN_EDGE] source=" + source + ", y=" + y
+                + ", band=" + band + ", host=" + host);
+    }
+
+    static int edgeDiagnosticBand(double y) {
+        if (!Double.isFinite(y) || y < 0 || y > 200) return Integer.MAX_VALUE;
+        if (y <= FULL_SCREEN_TOP_EDGE_HEIGHT) return 0;
+        if (y <= 25) return 1;
+        if (y <= 50) return 2;
+        if (y <= 100) return 3;
+        return 4;
+    }
+
+    private void logControlBarState(String state) {
+        HBox bar = exitBar;
+        Stage stage = fullScreenStage;
+        if (bar == null || stage == null) {
+            return;
+        }
+        Bounds screenBounds = bar.localToScreen(bar.getLayoutBounds());
+        logger.info(() -> "[FULLSCREEN_BAR] state=" + state
+                + ", host=" + host
+                + ", fullScreen=" + stage.isFullScreen()
+                + ", stage=" + stage.getX() + "," + stage.getY()
+                + " " + stage.getWidth() + "x" + stage.getHeight()
+                + ", visible=" + bar.isVisible()
+                + ", hover=" + bar.isHover()
+                + ", translateY=" + bar.getTranslateY()
+                + ", layout=" + bar.getLayoutX() + "," + bar.getLayoutY()
+                + " " + bar.getWidth() + "x" + bar.getHeight()
+                + ", screenBounds=" + screenBounds);
+    }
+
+    private Rectangle2D resolveFullScreenEdgeBounds(Stage stage) {
+        if (stage.isFullScreen()) {
+            var screens = Screen.getScreensForRectangle(stage.getX(), stage.getY(),
+                    Math.max(1, stage.getWidth()), Math.max(1, stage.getHeight()));
+            if (!screens.isEmpty()) {
+                // Screen bounds and Robot mouse positions use the same JavaFX
+                // coordinate space. Stage bounds are not reliable in native
+                // full-screen mode on every OS/window manager.
+                return screens.getFirst().getBounds();
+            }
+        }
+        Scene scene = stage.getScene();
+        if (scene != null && scene.getRoot() != null) {
+            Bounds bounds = scene.getRoot().localToScreen(scene.getRoot().getBoundsInLocal());
+            if (bounds != null && bounds.getWidth() > 0) {
+                return new Rectangle2D(bounds.getMinX(), bounds.getMinY(),
+                        bounds.getWidth(), Math.max(1, bounds.getHeight()));
+            }
+        }
+        return new Rectangle2D(stage.getX(), stage.getY(),
+                Math.max(0, stage.getWidth()), Math.max(0, stage.getHeight()));
     }
 
     private void stopFullScreenEdgeMonitor() {
@@ -523,8 +661,26 @@ public class RdpPane extends BorderPane {
 
     static boolean isAtFullScreenTopEdge(double mouseX, double mouseY,
                                          double stageX, double stageY, double stageWidth) {
-        return stageWidth > 0 && mouseX >= stageX && mouseX < stageX + stageWidth
-                && mouseY >= stageY && mouseY <= stageY + FULL_SCREEN_TOP_EDGE_HEIGHT;
+        return Double.isFinite(mouseX) && Double.isFinite(mouseY)
+                && Double.isFinite(stageX) && Double.isFinite(stageY)
+                && Double.isFinite(stageWidth) && stageWidth > 0
+                && mouseX >= stageX && mouseX < stageX + stageWidth
+                && isAtSceneTopEdge(mouseY - stageY);
+    }
+
+    static boolean isAtSceneTopEdge(double sceneY) {
+        return Double.isFinite(sceneY)
+                && sceneY >= 0 && sceneY <= FULL_SCREEN_TOP_EDGE_HEIGHT;
+    }
+
+    static boolean isAtRemoteTopEdge(int remoteY, int remoteHeight, double renderedHeight) {
+        if (remoteY < 0 || remoteHeight <= 0
+                || !Double.isFinite(renderedHeight) || renderedHeight <= 0) {
+            return false;
+        }
+        int remoteTriggerHeight = Math.max(1,
+                (int) Math.ceil(FULL_SCREEN_TOP_EDGE_HEIGHT * remoteHeight / renderedHeight));
+        return remoteY <= remoteTriggerHeight;
     }
 
     static double controlBarOffsetForSession(String sessionName, String xrdpSession) {

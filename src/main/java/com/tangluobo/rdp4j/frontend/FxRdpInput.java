@@ -2,6 +2,7 @@ package com.tangluobo.rdp4j.frontend;
 
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 import com.tangluobo.rdp4j.Input;
 import com.tangluobo.rdp4j.RdpInput;
@@ -51,6 +52,7 @@ public final class FxRdpInput implements RdpInput {
     private final FxRdpDisplay display;
     private final ImageView target;
     private final StackPane mouseTarget;
+    private final BiConsumer<Integer, Integer> pointerMovedListener;
     private final Set<KeyCode> pressedKeys = EnumSet.noneOf(KeyCode.class);
     private final EventHandler<InputMethodEvent> inputMethodFilter = event -> event.consume();
     private final ChangeListener<Boolean> focusListener = (observable, oldValue, focused) -> {
@@ -66,10 +68,16 @@ public final class FxRdpInput implements RdpInput {
     private boolean keypadLockSynchronizationPending = true;
 
     public FxRdpInput(State state, FxRdpDisplay display) {
+        this(state, display, null);
+    }
+
+    public FxRdpInput(State state, FxRdpDisplay display,
+                      BiConsumer<Integer, Integer> pointerMovedListener) {
         this.state = state;
         this.display = display;
         this.target = display.getImageView();
         this.mouseTarget = display.getView();
+        this.pointerMovedListener = pointerMovedListener == null ? (x, y) -> { } : pointerMovedListener;
         installHandlers();
     }
 
@@ -139,6 +147,10 @@ public final class FxRdpInput implements RdpInput {
 
     private void mouseMoved(MouseEvent event) {
         int[] point = toRemotePoint(event.getSceneX(), event.getSceneY());
+        // Notify the container before the remote server can acknowledge or
+        // reposition this pointer. This path is independent of the cursor
+        // protocol used by the connected Windows/Linux version.
+        pointerMovedListener.accept(point[0], point[1]);
         // Relative mouse mode in nested VM consoles depends on the ordering of
         // each absolute move and the following server-requested pointer warp.
         // Delaying moves until the next FX pulse can send a stale edge position

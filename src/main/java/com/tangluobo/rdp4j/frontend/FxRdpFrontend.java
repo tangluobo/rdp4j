@@ -2,6 +2,7 @@ package com.tangluobo.rdp4j.frontend;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
+import java.util.function.BiConsumer;
 
 import com.tangluobo.rdp4j.IContext;
 import com.tangluobo.rdp4j.State;
@@ -14,6 +15,8 @@ import javafx.scene.Node;
 public final class FxRdpFrontend implements RdpFrontend {
 
     private volatile FxRdpDisplay display;
+    private volatile BiConsumer<Integer, Integer> pointerMovedListener = (x, y) -> { };
+    private volatile BiConsumer<Integer, Integer> serverPointerMovedListener = (x, y) -> { };
 
     @Override
     public RdesktopCanvas createCanvas(IContext context, State state) {
@@ -33,11 +36,28 @@ public final class FxRdpFrontend implements RdpFrontend {
     }
 
     private RdesktopCanvas createOnFxThread(IContext context, State state) {
-        FxRdpDisplay nextDisplay = new FxRdpDisplay(state.getWidth(), state.getHeight());
+        FxRdpDisplay nextDisplay = new FxRdpDisplay(state.getWidth(), state.getHeight(),
+                this::notifyServerPointerMoved);
         RdesktopCanvas canvas = new RdesktopCanvas(context, state, nextDisplay, false);
-        canvas.setInput(new FxRdpInput(state, nextDisplay));
+        canvas.setInput(new FxRdpInput(state, nextDisplay, this::notifyPointerMoved));
         display = nextDisplay;
         return canvas;
+    }
+
+    public void setPointerMovedListener(BiConsumer<Integer, Integer> listener) {
+        pointerMovedListener = listener == null ? (x, y) -> { } : listener;
+    }
+
+    private void notifyPointerMoved(int x, int y) {
+        pointerMovedListener.accept(x, y);
+    }
+
+    public void setServerPointerMovedListener(BiConsumer<Integer, Integer> listener) {
+        serverPointerMovedListener = listener == null ? (x, y) -> { } : listener;
+    }
+
+    private void notifyServerPointerMoved(int x, int y) {
+        serverPointerMovedListener.accept(x, y);
     }
 
     public Node getView() {
