@@ -87,6 +87,7 @@ public class RdpPane extends BorderPane {
     private Stage fullScreenOwnerStage;
     private boolean fullScreenOwnerWindowHidden;
     private boolean fullScreenTransitioning;
+    private boolean remoteDesktopClosing;
     private double exitBarShownY;
     private int bestSceneEdgeBand = Integer.MAX_VALUE;
     private int bestLocalRemoteEdgeBand = Integer.MAX_VALUE;
@@ -415,7 +416,12 @@ public class RdpPane extends BorderPane {
         });
         stage.setOnCloseRequest(event -> {
             event.consume();
-            exitFullScreen();
+            // A native window-close request (including Windows taskbar
+            // "Close all windows") means close this RDP session.  Leaving
+            // full-screen is an explicit action on the control bar and must
+            // not be substituted here, otherwise the hidden owner window is
+            // merely restored and the application remains open.
+            closeRemoteDesktop();
         });
         // A Stage must be shown before JavaFX can complete its native
         // full-screen transition.  Keep that short-lived window transparent;
@@ -566,6 +572,7 @@ public class RdpPane extends BorderPane {
     private HBox createExitBar() {
         HBox bar = new HBox(8);
         bar.setAlignment(Pos.CENTER);
+        bar.setCursor(Cursor.DEFAULT);
         bar.setPrefWidth(420);
         bar.setMaxWidth(420);
         bar.setMinHeight(Region.USE_PREF_SIZE);
@@ -595,7 +602,7 @@ public class RdpPane extends BorderPane {
         Label title = new Label(ownerTab.getText() == null ? "远程桌面" : ownerTab.getText());
         title.setAlignment(Pos.CENTER);
         title.setMaxWidth(Double.MAX_VALUE);
-        title.setCursor(Cursor.H_RESIZE);
+        title.setCursor(Cursor.DEFAULT);
         title.setTooltip(createTooltip("左右拖动控制栏"));
         title.setStyle("-fx-text-fill: white; -fx-font-size: 14px;");
         HBox.setHgrow(title, Priority.ALWAYS);
@@ -1129,6 +1136,10 @@ public class RdpPane extends BorderPane {
     }
 
     private void closeRemoteDesktop() {
+        if (remoteDesktopClosing) {
+            return;
+        }
+        remoteDesktopClosing = true;
         Tab tab = ownerTab;
         exitFullScreen();
         disconnect();
