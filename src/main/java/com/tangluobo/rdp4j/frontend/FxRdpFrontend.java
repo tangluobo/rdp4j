@@ -10,11 +10,13 @@ import com.tangluobo.rdp4j.graphics.RdesktopCanvas;
 
 import javafx.application.Platform;
 import javafx.scene.Node;
+import javafx.scene.input.KeyEvent;
 
 /** Pure JavaFX frontend: no SwingNode, JComponent, EDT, or AWT input events. */
 public final class FxRdpFrontend implements RdpFrontend {
 
     private volatile FxRdpDisplay display;
+    private volatile FxRdpInput input;
     private volatile BiConsumer<Integer, Integer> pointerMovedListener = (x, y) -> { };
     private volatile BiConsumer<Integer, Integer> serverPointerMovedListener = (x, y) -> { };
 
@@ -39,8 +41,10 @@ public final class FxRdpFrontend implements RdpFrontend {
         FxRdpDisplay nextDisplay = new FxRdpDisplay(state.getWidth(), state.getHeight(),
                 this::notifyServerPointerMoved);
         RdesktopCanvas canvas = new RdesktopCanvas(context, state, nextDisplay, false);
-        canvas.setInput(new FxRdpInput(state, nextDisplay, this::notifyPointerMoved));
+        FxRdpInput nextInput = new FxRdpInput(state, nextDisplay, this::notifyPointerMoved);
+        canvas.setInput(nextInput);
         display = nextDisplay;
+        input = nextInput;
         return canvas;
     }
 
@@ -69,6 +73,34 @@ public final class FxRdpFrontend implements RdpFrontend {
         return display;
     }
 
+    /** Sends a full-screen Scene key event directly to the active RDP input. */
+    public boolean forwardKeyEvent(KeyEvent event) {
+        FxRdpInput current = input;
+        if (current == null) {
+            return false;
+        }
+        current.forwardKeyEvent(event);
+        return true;
+    }
+
+    public boolean hasKeyboardInput() {
+        return input != null;
+    }
+
+    /** Queues a Windows hook scan code onto the JavaFX/RDP input thread. */
+    public boolean forwardNativeKey(int scanCode, boolean extended, boolean release) {
+        if (input == null) {
+            return false;
+        }
+        executeOnUiThread(() -> {
+            FxRdpInput current = input;
+            if (current != null) {
+                current.forwardNativeKey(scanCode, extended, release);
+            }
+        });
+        return true;
+    }
+
     public void setScaleToFit(boolean scaleToFit) {
         FxRdpDisplay current = display;
         if (current != null) {
@@ -87,6 +119,13 @@ public final class FxRdpFrontend implements RdpFrontend {
 
     @Override
     public void disposeCanvas(RdesktopCanvas canvas) {
-        executeOnUiThread(() -> RdpFrontend.super.disposeCanvas(canvas));
+        executeOnUiThread(() -> {
+            FxRdpInput disposedInput = canvas != null && canvas.getInput() instanceof FxRdpInput fxInput
+                    ? fxInput : null;
+            RdpFrontend.super.disposeCanvas(canvas);
+            if (input == disposedInput) {
+                input = null;
+            }
+        });
     }
 }

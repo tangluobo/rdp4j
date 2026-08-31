@@ -1,7 +1,5 @@
 package com.tangluobo.rdp4j;
 
-import java.util.EnumSet;
-import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -12,6 +10,7 @@ import javafx.animation.AnimationTimer;
 import javafx.animation.PauseTransition;
 import javafx.animation.TranslateTransition;
 import javafx.application.Platform;
+import javafx.event.EventDispatcher;
 import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -28,7 +27,6 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
-import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
@@ -58,7 +56,8 @@ public class RdpPane extends BorderPane {
 
     private final FxRdpFrontend frontend = new FxRdpFrontend();
     private final RdpClient rdpClient = new RdpClient(frontend);
-    private final Set<KeyCode> locallyConsumedKeys = EnumSet.noneOf(KeyCode.class);
+    private final WindowsFullScreenKeyboardHook.KeySink fullScreenNativeKeySink =
+            (scanCode, extended, release) -> frontend.forwardNativeKey(scanCode, extended, release);
     private ScrollPane desktopScrollPane;
     private Node desktopView;
     private boolean windowScrollBarsSuppressed;
@@ -100,8 +99,6 @@ public class RdpPane extends BorderPane {
     private int screenWidth;
     private int screenHeight;
     private int colorDepth;
-    private volatile KeyCombination fullScreenKeys = KeyCombination.valueOf("Ctrl+Shift+Enter");
-
     public RdpPane() {
         frontend.setPointerMovedListener(this::onRemotePointerMoved);
         frontend.setServerPointerMovedListener(this::onServerPointerMoved);
@@ -114,19 +111,6 @@ public class RdpPane extends BorderPane {
         setBottom(statusBar);
         getStyleClass().add("rdp-pane");
 
-        addEventFilter(KeyEvent.KEY_PRESSED, event -> {
-            if (fullScreenKeys != null && fullScreenKeys.match(event)) {
-                locallyConsumedKeys.add(event.getCode());
-                event.consume();
-                rdpClient.releaseRemoteModifierKeys();
-                toggleFullScreen();
-            }
-        });
-        addEventFilter(KeyEvent.KEY_RELEASED, event -> {
-            if (locallyConsumedKeys.remove(event.getCode())) {
-                event.consume();
-            }
-        });
     }
 
     private Node createLoadingView(String text) {
@@ -240,7 +224,6 @@ public class RdpPane extends BorderPane {
             exitFullScreen();
         }
         stopFullScreenEdgeMonitor();
-        locallyConsumedKeys.clear();
         rdpClient.disconnect();
         desktopScrollPane = null;
         desktopView = null;
@@ -294,23 +277,18 @@ public class RdpPane extends BorderPane {
         });
     }
 
+    /**
+     * Retained as a source-compatible no-op. Full-screen keyboard shortcuts
+     * are intentionally disabled so every delivered key goes to the remote.
+     */
+    @Deprecated
     public void setFullScreenShortcut(String shortcutText) {
-        String text = shortcutText == null || shortcutText.isBlank()
-                ? "Ctrl+Shift+Enter" : shortcutText.trim();
-        try {
-            fullScreenKeys = KeyCombination.valueOf(text);
-            Stage stage = fullScreenStage;
-            if (stage != null) {
-                stage.setFullScreenExitKeyCombination(fullScreenKeys);
-                stage.setFullScreenExitHint("按 " + fullScreenKeys.getName() + " 退出全屏");
-            }
-        } catch (IllegalArgumentException ignored) {
-            // Keep the last valid shortcut.
-        }
     }
 
+    /** @deprecated Full-screen no longer reserves a local keyboard shortcut. */
+    @Deprecated
     public String getFullScreenShortcutText() {
-        return fullScreenKeys == null ? "Ctrl+Shift+Enter" : fullScreenKeys.getName();
+        return "";
     }
 
     public void toggleFullScreen() {
@@ -360,20 +338,23 @@ public class RdpPane extends BorderPane {
                 showExitBar("scene");
             }
         });
-
         Stage stage = new Stage();
         fullScreenStage = stage;
         restoreFullScreenOnFocus = false;
         stage.setTitle(ownerTab.getText() == null ? "远程桌面" : ownerTab.getText());
         stage.setScene(scene);
-        stage.setFullScreenExitKeyCombination(fullScreenKeys);
-        stage.setFullScreenExitHint("按 " + fullScreenKeys.getName() + " 退出全屏");
+        installFullScreenKeyboardCapture(scene, stage);
+        stage.setFullScreenExitKeyCombination(KeyCombination.NO_MATCH);
+        stage.setFullScreenExitHint("");
         fullScreenTargetBounds = positionOnOwnerScreen(stage);
         stage.fullScreenProperty().addListener((observable, wasFullScreen, isFullScreen) -> {
             if (isFullScreen) {
                 restoreFullScreenOnFocus = false;
                 fullScreenMinimized = false;
                 hideOwnerWindowForFullScreen(stage);
+                if (stage.isFocused()) {
+                    activateNativeFullScreenKeyboard();
+                }
             } else if (wasFullScreen && !fullScreenTransitioning && fullScreenStage == stage) {
                 // JavaFX automatically leaves full-screen when the Stage loses
                 // focus. Defer the decision by one FX pulse so focusedProperty
@@ -382,7 +363,15 @@ public class RdpPane extends BorderPane {
             }
         });
         stage.focusedProperty().addListener((observable, wasFocused, isFocused) -> {
-            if (fullScreenStage != stage || fullScreenTransitioning) {
+            if (fullScreenStage != stage) {
+                return;
+            }
+            if (isFocused) {
+                activateNativeFullScreenKeyboard();
+            } else {
+                deactivateNativeFullScreenKeyboard();
+            }
+            if (fullScreenTransitioning) {
                 return;
             }
             if (!isFocused && stage.isFullScreen()) {
@@ -429,9 +418,42 @@ public class RdpPane extends BorderPane {
             }
             stage.setFullScreen(true);
             fullScreenTransitioning = false;
+            if (stage.isFocused()) {
+                activateNativeFullScreenKeyboard();
+            }
             showExitBar("initial");
             Platform.runLater(() -> logControlBarState("entered"));
             requestRdpFocus();
+        });
+    }
+
+    private void activateNativeFullScreenKeyboard() {
+        if (frontend.hasKeyboardInput()) {
+            WindowsFullScreenKeyboardHook.instance().activate(fullScreenNativeKeySink);
+        }
+    }
+
+    private void deactivateNativeFullScreenKeyboard() {
+        WindowsFullScreenKeyboardHook.instance().deactivate(fullScreenNativeKeySink);
+    }
+
+    private void installFullScreenKeyboardCapture(Scene scene, Stage stage) {
+        EventDispatcher localDispatcher = scene.getEventDispatcher();
+        scene.setEventDispatcher((event, tail) -> {
+            if (event instanceof KeyEvent keyEvent && fullScreenStage == stage) {
+                boolean forwarded = frontend.forwardKeyEvent(keyEvent);
+                if (keyEvent.getCode() == javafx.scene.input.KeyCode.TAB) {
+                    logger.info(() -> "[FULLSCREEN_KEY] code=TAB, ctrl="
+                            + keyEvent.isControlDown() + ", forwarded=" + forwarded
+                            + ", host=" + host);
+                }
+                // A Scene's built-in dispatcher owns accelerators, focus
+                // traversal and control behaviors. Returning before invoking
+                // it prevents Ctrl+Tab from ever reaching the local TabPane.
+                keyEvent.consume();
+                return null;
+            }
+            return localDispatcher.dispatchEvent(event, tail);
         });
     }
 
@@ -642,6 +664,7 @@ public class RdpPane extends BorderPane {
         if (stage == null) {
             return;
         }
+        deactivateNativeFullScreenKeyboard();
         Stage ownerStage = fullScreenOwnerStage;
         boolean restoreOwnerWindow = fullScreenOwnerWindowHidden;
         rdpClient.releaseRemoteModifierKeys();

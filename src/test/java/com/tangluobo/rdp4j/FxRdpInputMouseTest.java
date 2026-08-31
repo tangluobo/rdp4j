@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import com.tangluobo.rdp4j.frontend.FxRdpInput;
 import com.tangluobo.rdp4j.frontend.FxRdpDisplay;
+import javafx.scene.input.KeyCode;
 
 class FxRdpInputMouseTest {
 
@@ -43,5 +44,20 @@ class FxRdpInputMouseTest {
                 "hidden-recapture-position"));
         assertTrue(FxRdpDisplay.shouldHideForServerPointerPosition(true, "custom-24x24"));
         assertTrue(FxRdpDisplay.shouldHideForServerPointerPosition(true, "default"));
+    }
+
+    @Test
+    void fullScreenCombinationsHaveRemoteScanCodes() {
+        assertEquals(0x1d, FxRdpInput.scancodeFor(KeyCode.CONTROL));
+        assertEquals(0x0f, FxRdpInput.scancodeFor(KeyCode.TAB));
+        assertEquals(0x01, FxRdpInput.scancodeFor(KeyCode.ESCAPE));
+    }
+
+    @Test
+    void normalizesNativeWindowsScanCodes() {
+        assertEquals(0x0f, FxRdpInput.normalizeNativeScanCode(0x0f, false));
+        assertEquals(0x9d, FxRdpInput.normalizeNativeScanCode(0x1d, true));
+        assertEquals(-1, FxRdpInput.normalizeNativeScanCode(0, false));
+        assertEquals(-1, FxRdpInput.normalizeNativeScanCode(0x100, false));
     }
 }

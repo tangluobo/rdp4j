@@ -95,6 +95,41 @@ public final class FxRdpInput implements RdpInput {
         target.focusedProperty().addListener(focusListener);
     }
 
+    /**
+     * Dispatches a Scene-level key event through the same RDP path used by the
+     * focused desktop image. Full-screen containers use this before JavaFX can
+     * interpret combinations such as Ctrl+Tab as local focus traversal.
+     */
+    public void forwardKeyEvent(KeyEvent event) {
+        if (event == null) {
+            return;
+        }
+        if (event.getEventType() == KeyEvent.KEY_PRESSED) {
+            keyPressed(event);
+        } else if (event.getEventType() == KeyEvent.KEY_RELEASED) {
+            keyReleased(event);
+        } else {
+            // Physical press/release events carry the scan codes. Consuming
+            // KEY_TYPED prevents local controls from processing the character.
+            event.consume();
+        }
+    }
+
+    /** Sends a scan code captured before JavaFX receives the native key. */
+    public void forwardNativeKey(int scanCode, boolean extended, boolean release) {
+        int normalized = normalizeNativeScanCode(scanCode, extended);
+        if (normalized >= 0) {
+            sendScancode(normalized, release);
+        }
+    }
+
+    public static int normalizeNativeScanCode(int scanCode, boolean extended) {
+        if (scanCode <= 0 || scanCode > 0xff) {
+            return -1;
+        }
+        return extended ? scanCode | SCANCODE_EXTENDED : scanCode;
+    }
+
     private void keyPressed(KeyEvent event) {
         int scancode = scancodeFor(event.getCode());
         if (scancode < 0) {
