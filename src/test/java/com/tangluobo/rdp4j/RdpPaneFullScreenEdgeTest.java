@@ -67,6 +67,25 @@ class RdpPaneFullScreenEdgeTest {
     }
 
     @Test
+    void defersAutomaticFullScreenExitCausedByFocusLoss() {
+        assertTrue(RdpPane.shouldDeferFullScreenExit(false, false));
+        assertTrue(RdpPane.shouldDeferFullScreenExit(true, true));
+    }
+
+    @Test
+    void treatsFocusedFullScreenExitAsExplicitUserAction() {
+        assertFalse(RdpPane.shouldDeferFullScreenExit(true, false));
+    }
+
+    @Test
+    void restoresFullScreenAfterItsWindowIsDeiconified() {
+        assertTrue(RdpPane.shouldRestoreAfterDeiconify(true, false, false));
+        assertFalse(RdpPane.shouldRestoreAfterDeiconify(false, false, false));
+        assertFalse(RdpPane.shouldRestoreAfterDeiconify(true, true, false));
+        assertFalse(RdpPane.shouldRestoreAfterDeiconify(true, false, true));
+    }
+
+    @Test
     void groupsEdgeDiagnosticsWithoutLoggingEveryMousePixel() {
         assertEquals(0, RdpPane.edgeDiagnosticBand(0));
         assertEquals(0, RdpPane.edgeDiagnosticBand(12));

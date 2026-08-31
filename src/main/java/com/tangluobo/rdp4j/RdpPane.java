@@ -80,6 +80,12 @@ public class RdpPane extends BorderPane {
     private boolean exitBarDragging;
     private double exitBarDragStartSceneX;
     private double exitBarDragStartTranslateX;
+    private boolean restoreFullScreenOnFocus;
+    private boolean fullScreenMinimized;
+    private Rectangle2D fullScreenTargetBounds;
+    private boolean hideOwnerWindowInFullScreen;
+    private Stage fullScreenOwnerStage;
+    private boolean fullScreenOwnerWindowHidden;
     private boolean fullScreenTransitioning;
     private double exitBarShownY;
     private int bestSceneEdgeBand = Integer.MAX_VALUE;
@@ -262,6 +268,32 @@ public class RdpPane extends BorderPane {
         return fullScreenStage != null;
     }
 
+    public void setHideOwnerWindowInFullScreen(boolean hideOwnerWindowInFullScreen) {
+        this.hideOwnerWindowInFullScreen = hideOwnerWindowInFullScreen;
+    }
+
+    public boolean isOwnerWindowTemporarilyHiddenForFullScreen() {
+        return fullScreenOwnerWindowHidden;
+    }
+
+    public void activateFullScreenWindow() {
+        runOnFxThread(() -> {
+            Stage stage = fullScreenStage;
+            if (stage == null) {
+                return;
+            }
+            if (!stage.isFullScreen()) {
+                restoreFullScreenOnFocus = true;
+            }
+            stage.setIconified(false);
+            if (!stage.isShowing()) {
+                stage.show();
+            }
+            stage.toFront();
+            stage.requestFocus();
+        });
+    }
+
     public void setFullScreenShortcut(String shortcutText) {
         String text = shortcutText == null || shortcutText.isBlank()
                 ? "Ctrl+Shift+Enter" : shortcutText.trim();
@@ -303,6 +335,8 @@ public class RdpPane extends BorderPane {
             verticalPolicyBeforeFullScreen = desktopScrollPane.getVbarPolicy();
             horizontalPolicyBeforeFullScreen = desktopScrollPane.getHbarPolicy();
         }
+        fullScreenOwnerStage = hideOwnerWindowInFullScreen ? resolveOwnerStage() : null;
+        fullScreenOwnerWindowHidden = false;
         ownerTab.setContent(new StackPane());
         setBottom(null);
         setStyle("-fx-background-color: black;");
@@ -329,14 +363,57 @@ public class RdpPane extends BorderPane {
 
         Stage stage = new Stage();
         fullScreenStage = stage;
+        restoreFullScreenOnFocus = false;
         stage.setTitle(ownerTab.getText() == null ? "远程桌面" : ownerTab.getText());
         stage.setScene(scene);
         stage.setFullScreenExitKeyCombination(fullScreenKeys);
         stage.setFullScreenExitHint("按 " + fullScreenKeys.getName() + " 退出全屏");
-        positionOnOwnerScreen(stage);
+        fullScreenTargetBounds = positionOnOwnerScreen(stage);
         stage.fullScreenProperty().addListener((observable, wasFullScreen, isFullScreen) -> {
-            if (wasFullScreen && !isFullScreen && !fullScreenTransitioning && fullScreenStage == stage) {
-                exitFullScreen();
+            if (isFullScreen) {
+                restoreFullScreenOnFocus = false;
+                fullScreenMinimized = false;
+                hideOwnerWindowForFullScreen(stage);
+            } else if (wasFullScreen && !fullScreenTransitioning && fullScreenStage == stage) {
+                // JavaFX automatically leaves full-screen when the Stage loses
+                // focus. Defer the decision by one FX pulse so focusedProperty
+                // has also received the native focus change.
+                Platform.runLater(() -> handleNativeFullScreenExit(stage));
+            }
+        });
+        stage.focusedProperty().addListener((observable, wasFocused, isFocused) -> {
+            if (fullScreenStage != stage || fullScreenTransitioning) {
+                return;
+            }
+            if (!isFocused && stage.isFullScreen()) {
+                restoreFullScreenOnFocus = true;
+                logger.info(() -> "[FULLSCREEN_STATE] state=suspended-by-focus-loss, host=" + host);
+            } else if (isFocused && restoreFullScreenOnFocus && !stage.isFullScreen()) {
+                restoreFullScreenAfterFocus(stage);
+            }
+        });
+        stage.iconifiedProperty().addListener((observable, wasIconified, isIconified) -> {
+            if (fullScreenStage != stage || fullScreenTransitioning) {
+                return;
+            }
+            if (isIconified) {
+                fullScreenMinimized = true;
+                restoreFullScreenOnFocus = true;
+                logger.info(() -> "[FULLSCREEN_STATE] state=minimized, host=" + host);
+            } else if (shouldRestoreAfterDeiconify(fullScreenMinimized,
+                    isIconified, stage.isFullScreen())) {
+                Platform.runLater(() -> {
+                    if (fullScreenStage != stage || stage.isIconified()) {
+                        return;
+                    }
+                    stage.toFront();
+                    stage.requestFocus();
+                    if (!stage.isFullScreen()) {
+                        restoreFullScreenAfterFocus(stage);
+                    } else {
+                        fullScreenMinimized = false;
+                    }
+                });
             }
         });
         stage.setOnCloseRequest(event -> {
@@ -356,6 +433,89 @@ public class RdpPane extends BorderPane {
             Platform.runLater(() -> logControlBarState("entered"));
             requestRdpFocus();
         });
+    }
+
+    private Stage resolveOwnerStage() {
+        if (ownerTab == null || ownerTab.getTabPane() == null
+                || ownerTab.getTabPane().getScene() == null) {
+            return null;
+        }
+        Window window = ownerTab.getTabPane().getScene().getWindow();
+        return window instanceof Stage stage ? stage : null;
+    }
+
+    private void hideOwnerWindowForFullScreen(Stage stage) {
+        Stage owner = fullScreenOwnerStage;
+        if (!hideOwnerWindowInFullScreen || fullScreenOwnerWindowHidden
+                || owner == null || owner == stage || !owner.isShowing()) {
+            return;
+        }
+        // The RDP node now lives in the dedicated full-screen stage. Keeping
+        // its independent owner visible leaves a second, empty taskbar window.
+        fullScreenOwnerWindowHidden = true;
+        owner.hide();
+    }
+
+    private void handleNativeFullScreenExit(Stage stage) {
+        if (fullScreenStage != stage || fullScreenTransitioning || stage.isFullScreen()) {
+            return;
+        }
+        if (shouldDeferFullScreenExit(stage.isFocused(), restoreFullScreenOnFocus)) {
+            restoreFullScreenOnFocus = true;
+            logger.info(() -> "[FULLSCREEN_STATE] state=waiting-for-focus, host=" + host);
+            return;
+        }
+        // The stage still has focus, so this was an explicit native exit such
+        // as Escape rather than the documented focus-loss behavior.
+        exitFullScreen();
+    }
+
+    private void restoreFullScreenAfterFocus(Stage stage) {
+        if (fullScreenStage != stage || fullScreenTransitioning || stage.isFullScreen()) {
+            return;
+        }
+        fullScreenTransitioning = true;
+        Rectangle2D target = fullScreenTargetBounds;
+        if (target != null) {
+            // The non-full-screen coordinates decide which monitor JavaFX will
+            // use when it enters full-screen again.
+            stage.setX(target.getMinX());
+            stage.setY(target.getMinY());
+        }
+        stage.setFullScreen(true);
+        Platform.runLater(() -> {
+            if (fullScreenStage != stage) {
+                fullScreenTransitioning = false;
+                return;
+            }
+            boolean restored = stage.isFullScreen();
+            fullScreenTransitioning = false;
+            if (restored) {
+                restoreFullScreenOnFocus = false;
+                logger.info(() -> "[FULLSCREEN_STATE] state=restored-after-focus, host=" + host);
+                showExitBar("focus-restored");
+                requestRdpFocus();
+            } else if (!stage.isFocused()) {
+                restoreFullScreenOnFocus = true;
+            } else {
+                // Never leave the dedicated full-screen stage stranded as a
+                // borderless-looking normal window if the platform rejects
+                // restoration.
+                logger.warning("恢复RDP全屏失败，返回原窗口");
+                exitFullScreen();
+            }
+        });
+    }
+
+    static boolean shouldDeferFullScreenExit(boolean stageFocused,
+                                             boolean focusLossObserved) {
+        return !stageFocused || focusLossObserved;
+    }
+
+    static boolean shouldRestoreAfterDeiconify(boolean minimizedForFullScreen,
+                                               boolean iconified,
+                                               boolean fullScreen) {
+        return minimizedForFullScreen && !iconified && !fullScreen;
     }
 
     private HBox createExitBar() {
@@ -482,6 +642,8 @@ public class RdpPane extends BorderPane {
         if (stage == null) {
             return;
         }
+        Stage ownerStage = fullScreenOwnerStage;
+        boolean restoreOwnerWindow = fullScreenOwnerWindowHidden;
         rdpClient.releaseRemoteModifierKeys();
         fullScreenTransitioning = true;
         StackPane oldRoot = fullScreenRoot;
@@ -495,6 +657,10 @@ public class RdpPane extends BorderPane {
         exitBar = null;
         exitBarPinned = false;
         exitBarDragging = false;
+        restoreFullScreenOnFocus = false;
+        fullScreenMinimized = false;
+        fullScreenTargetBounds = null;
+        fullScreenOwnerStage = null;
         applyFullScreenPresentation(false);
         // An independent window can suppress its bars while its initial size
         // is fitted to a windowed desktop. Once a full-screen desktop returns
@@ -509,8 +675,13 @@ public class RdpPane extends BorderPane {
         if (ownerTab != null && ownerTab.getTabPane() != null) {
             ownerTab.setContent(this);
         }
+        if (restoreOwnerWindow && ownerStage != null) {
+            ownerStage.show();
+            ownerStage.toFront();
+        }
         stage.setOnCloseRequest(null);
         stage.hide();
+        fullScreenOwnerWindowHidden = false;
         fullScreenTransitioning = false;
         Platform.runLater(this::requestRdpFocus);
     }
@@ -532,19 +703,30 @@ public class RdpPane extends BorderPane {
         }
     }
 
-    private void positionOnOwnerScreen(Stage stage) {
+    private Rectangle2D positionOnOwnerScreen(Stage stage) {
+        Rectangle2D target = Screen.getPrimary().getBounds();
         try {
-            if (ownerTab.getTabPane() == null || ownerTab.getTabPane().getScene() == null) return;
+            if (ownerTab.getTabPane() == null || ownerTab.getTabPane().getScene() == null) {
+                stage.setX(target.getMinX());
+                stage.setY(target.getMinY());
+                return target;
+            }
             Window owner = ownerTab.getTabPane().getScene().getWindow();
-            if (owner == null) return;
+            if (owner == null) {
+                stage.setX(target.getMinX());
+                stage.setY(target.getMinY());
+                return target;
+            }
             Rectangle2D probe = new Rectangle2D(owner.getX(), owner.getY(), 1, 1);
             for (Screen screen : Screen.getScreensForRectangle(probe)) {
-                stage.setX(screen.getBounds().getMinX());
-                stage.setY(screen.getBounds().getMinY());
+                target = screen.getBounds();
                 break;
             }
         } catch (RuntimeException ignored) {
         }
+        stage.setX(target.getMinX());
+        stage.setY(target.getMinY());
+        return target;
     }
 
     private void showExitBar() {
@@ -797,14 +979,16 @@ public class RdpPane extends BorderPane {
     }
 
     private void minimizeFullScreen() {
-        Tab tab = ownerTab;
-        exitFullScreen();
-        Platform.runLater(() -> {
-            if (tab != null && tab.getTabPane() != null && tab.getTabPane().getScene() != null
-                    && tab.getTabPane().getScene().getWindow() instanceof Stage stage) {
-                stage.setIconified(true);
-            }
-        });
+        Stage stage = fullScreenStage;
+        if (stage == null) {
+            return;
+        }
+        // Minimizing is a temporary suspension, not an explicit request to
+        // leave full-screen. Keep the RDP node in this stage so restoring the
+        // taskbar window can re-enter full-screen on the same monitor.
+        fullScreenMinimized = true;
+        restoreFullScreenOnFocus = true;
+        stage.setIconified(true);
     }
 
     private void closeRemoteDesktop() {
