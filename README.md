@@ -21,9 +21,23 @@ The artifact coordinates are:
 <dependency>
     <groupId>com.tangluobo</groupId>
     <artifactId>rdp4j</artifactId>
-    <version>1.0.5</version>
+    <version>1.0.2</version>
 </dependency>
 ```
+
+## Publish to Maven Central
+
+Configure the `mvn-center-repo` server credentials in Maven `settings.xml`,
+then run:
+
+```shell
+mvn deploy
+```
+
+The build creates and signs the main, source, Javadoc, and POM artifacts. The
+Central deployment is automatically published after validation. On Windows,
+the project uses `.mvn/gpg.cmd` to locate GPG, including the copy bundled with
+Git for Windows.
 
 The frontend is selected explicitly through `RdpFrontend`. `SwingRdpFrontend`
 retains the original Swing canvas and input path, while `FxRdpFrontend` uses a
