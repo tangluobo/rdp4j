@@ -53,6 +53,20 @@ class RdpPaneFullScreenEdgeTest {
     }
 
     @Test
+    void clampsHorizontalControlBarDragInsideFullScreenWidth() {
+        assertEquals(300, RdpPane.clampControlBarTranslateX(500, 1020, 420));
+        assertEquals(-300, RdpPane.clampControlBarTranslateX(-500, 1020, 420));
+        assertEquals(125, RdpPane.clampControlBarTranslateX(125, 1020, 420));
+    }
+
+    @Test
+    void centersControlBarWhenHorizontalDragBoundsAreInvalid() {
+        assertEquals(0, RdpPane.clampControlBarTranslateX(100, 300, 420));
+        assertEquals(0, RdpPane.clampControlBarTranslateX(Double.NaN, 1020, 420));
+        assertEquals(0, RdpPane.clampControlBarTranslateX(100, 0, 420));
+    }
+
+    @Test
     void groupsEdgeDiagnosticsWithoutLoggingEveryMousePixel() {
         assertEquals(0, RdpPane.edgeDiagnosticBand(0));
         assertEquals(0, RdpPane.edgeDiagnosticBand(12));

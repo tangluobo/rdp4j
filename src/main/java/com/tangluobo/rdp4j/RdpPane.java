@@ -16,10 +16,12 @@ import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.geometry.Rectangle2D;
+import javafx.scene.Cursor;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBase;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Tab;
@@ -29,6 +31,7 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.KeyEvent;
+import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -74,6 +77,9 @@ public class RdpPane extends BorderPane {
     private TranslateTransition exitBarSlide;
     private AnimationTimer fullScreenEdgeMouseMonitor;
     private boolean exitBarPinned;
+    private boolean exitBarDragging;
+    private double exitBarDragStartSceneX;
+    private double exitBarDragStartTranslateX;
     private boolean fullScreenTransitioning;
     private double exitBarShownY;
     private int bestSceneEdgeBand = Integer.MAX_VALUE;
@@ -384,6 +390,8 @@ public class RdpPane extends BorderPane {
         Label title = new Label(ownerTab.getText() == null ? "远程桌面" : ownerTab.getText());
         title.setAlignment(Pos.CENTER);
         title.setMaxWidth(Double.MAX_VALUE);
+        title.setCursor(Cursor.H_RESIZE);
+        title.setTooltip(createTooltip("左右拖动控制栏"));
         title.setStyle("-fx-text-fill: white; -fx-font-size: 14px;");
         HBox.setHgrow(title, Priority.ALWAYS);
 
@@ -396,6 +404,7 @@ public class RdpPane extends BorderPane {
         Button close = createControlButton("M5 6.5L5.5 6 12 12.5 18.5 6 19 6.5 12.5 13 19 19.5 18.5 20 12 13.5 5.5 20 5 19.5 11.5 13Z", "关闭远程桌面", true);
         close.setOnAction(event -> closeRemoteDesktop());
         bar.getChildren().addAll(pin, quality, title, minimize, exit, close);
+        installExitBarHorizontalDrag(bar);
         bar.setOnMouseEntered(event -> {
             if (hideExitBarTimer != null) hideExitBarTimer.stop();
             showExitBar("handle");
@@ -406,6 +415,66 @@ public class RdpPane extends BorderPane {
         hideExitBarTimer = new PauseTransition(Duration.seconds(5));
         hideExitBarTimer.setOnFinished(event -> hideExitBar());
         return bar;
+    }
+
+    private void installExitBarHorizontalDrag(HBox bar) {
+        bar.addEventFilter(MouseEvent.MOUSE_PRESSED, event -> {
+            if (event.getButton() != MouseButton.PRIMARY
+                    || isInsideControlButton(event.getTarget(), bar)) {
+                return;
+            }
+            exitBarDragging = true;
+            exitBarDragStartSceneX = event.getSceneX();
+            exitBarDragStartTranslateX = bar.getTranslateX();
+            if (hideExitBarTimer != null) {
+                hideExitBarTimer.stop();
+            }
+            event.consume();
+        });
+        bar.addEventFilter(MouseEvent.MOUSE_DRAGGED, event -> {
+            if (!exitBarDragging || !event.isPrimaryButtonDown()) {
+                return;
+            }
+            double containerWidth = fullScreenRoot == null ? 0 : fullScreenRoot.getWidth();
+            double barWidth = bar.getWidth() > 0 ? bar.getWidth() : bar.prefWidth(-1);
+            double requestedX = exitBarDragStartTranslateX
+                    + event.getSceneX() - exitBarDragStartSceneX;
+            bar.setTranslateX(clampControlBarTranslateX(requestedX, containerWidth, barWidth));
+            event.consume();
+        });
+        bar.addEventFilter(MouseEvent.MOUSE_RELEASED, event -> {
+            if (!exitBarDragging || event.getButton() != MouseButton.PRIMARY) {
+                return;
+            }
+            exitBarDragging = false;
+            if (!exitBarPinned && hideExitBarTimer != null && !bar.isHover()) {
+                hideExitBarTimer.playFromStart();
+            }
+            event.consume();
+        });
+    }
+
+    private static boolean isInsideControlButton(Object target, HBox bar) {
+        if (!(target instanceof Node node)) {
+            return false;
+        }
+        while (node != null && node != bar) {
+            if (node instanceof ButtonBase) {
+                return true;
+            }
+            node = node.getParent();
+        }
+        return false;
+    }
+
+    static double clampControlBarTranslateX(double requestedX, double containerWidth,
+                                            double barWidth) {
+        if (!Double.isFinite(requestedX) || !Double.isFinite(containerWidth)
+                || !Double.isFinite(barWidth) || containerWidth <= 0 || barWidth <= 0) {
+            return 0;
+        }
+        double maxOffset = Math.max(0, (containerWidth - barWidth) / 2);
+        return Math.max(-maxOffset, Math.min(maxOffset, requestedX));
     }
 
     private void exitFullScreen() {
@@ -425,6 +494,7 @@ public class RdpPane extends BorderPane {
         exitBarSlide = null;
         exitBar = null;
         exitBarPinned = false;
+        exitBarDragging = false;
         applyFullScreenPresentation(false);
         // An independent window can suppress its bars while its initial size
         // is fitted to a windowed desktop. Once a full-screen desktop returns
