@@ -19,6 +19,13 @@ class RdpPaneKeyboardBridgeTest {
     }
 
     @Test
+    void mapsRemoteClipboardShortcutKeysToPhysicalScancodes() {
+        assertEquals(0x1d, FxRdpInput.scancodeFor(KeyCode.CONTROL));
+        assertEquals(0x2e, FxRdpInput.scancodeFor(KeyCode.C));
+        assertEquals(0x2f, FxRdpInput.scancodeFor(KeyCode.V));
+    }
+
+    @Test
     void mapsNumpadKeysWithoutAwtLocationTranslation() {
         assertEquals(0x4f, FxRdpInput.scancodeFor(KeyCode.NUMPAD1));
         assertEquals(0x50, FxRdpInput.scancodeFor(KeyCode.KP_DOWN));

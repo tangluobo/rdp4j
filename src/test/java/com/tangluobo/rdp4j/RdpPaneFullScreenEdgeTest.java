@@ -104,14 +104,6 @@ class RdpPaneFullScreenEdgeTest {
     }
 
     @Test
-    void offsetsControlBarWhenApplicationRunsInsideAnotherRdpSession() {
-        assertEquals(0, RdpPane.controlBarOffsetForSession("Console", null));
-        assertEquals(44, RdpPane.controlBarOffsetForSession("RDP-Tcp#7", null));
-        assertEquals(44, RdpPane.controlBarOffsetForSession("rdp-tcp#2", null));
-        assertEquals(44, RdpPane.controlBarOffsetForSession(null, "xrdp-session"));
-    }
-
-    @Test
     void selectsMonitorWithLargestWindowOverlap() {
         Rectangle2D mostlySecondary = new Rectangle2D(1700, 100, 1000, 800);
 

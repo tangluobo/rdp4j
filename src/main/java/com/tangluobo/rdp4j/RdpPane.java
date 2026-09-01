@@ -52,7 +52,6 @@ public class RdpPane extends BorderPane {
     private static final Logger logger = Logger.getLogger(RdpPane.class.getName());
     private static final double FULL_SCREEN_TOP_EDGE_HEIGHT = 12;
     private static final double CONTROL_BAR_HANDLE_HEIGHT = 3;
-    private static final double NESTED_CONTROL_BAR_OFFSET = 44;
     private static final long EDGE_POLL_INTERVAL_NANOS = 16_000_000L;
 
     private final FxRdpFrontend frontend = new FxRdpFrontend();
@@ -88,7 +87,6 @@ public class RdpPane extends BorderPane {
     private boolean fullScreenOwnerWindowHidden;
     private boolean fullScreenTransitioning;
     private boolean remoteDesktopClosing;
-    private double exitBarShownY;
     private int bestSceneEdgeBand = Integer.MAX_VALUE;
     private int bestLocalRemoteEdgeBand = Integer.MAX_VALUE;
     private int bestServerRemoteEdgeBand = Integer.MAX_VALUE;
@@ -112,7 +110,6 @@ public class RdpPane extends BorderPane {
         statusBar = createStatusBar();
         setBottom(statusBar);
         getStyleClass().add("rdp-pane");
-
     }
 
     private Node createLoadingView(String text) {
@@ -330,9 +327,7 @@ public class RdpPane extends BorderPane {
         applyFullScreenPresentation(true);
 
         exitBar = createExitBar();
-        exitBarShownY = controlBarOffsetForSession(
-                System.getenv("SESSIONNAME"), System.getenv("XRDP_SESSION"));
-        exitBar.setTranslateY(exitBarShownY);
+        exitBar.setTranslateY(0);
         StackPane.setAlignment(exitBar, Pos.TOP_CENTER);
 
         fullScreenRoot = new StackPane(this, exitBar);
@@ -882,10 +877,10 @@ public class RdpPane extends BorderPane {
             return;
         }
         boolean wasHidden = !exitBar.isVisible()
-                || Math.abs(exitBar.getTranslateY() - exitBarShownY) > 0.5;
+                || Math.abs(exitBar.getTranslateY()) > 0.5;
         if (exitBarSlide != null) exitBarSlide.stop();
         exitBar.setVisible(true);
-        exitBar.setTranslateY(exitBarShownY);
+        exitBar.setTranslateY(0);
         if (wasHidden) {
             logControlBarState("shown-by-" + source);
         }
@@ -1077,12 +1072,6 @@ public class RdpPane extends BorderPane {
         int remoteTriggerHeight = Math.max(1,
                 (int) Math.ceil(FULL_SCREEN_TOP_EDGE_HEIGHT * remoteHeight / renderedHeight));
         return remoteY <= remoteTriggerHeight;
-    }
-
-    static double controlBarOffsetForSession(String sessionName, String xrdpSession) {
-        String normalized = sessionName == null ? "" : sessionName.trim().toUpperCase();
-        return normalized.startsWith("RDP-") || (xrdpSession != null && !xrdpSession.isBlank())
-                ? NESTED_CONTROL_BAR_OFFSET : 0;
     }
 
     private Button createControlButton(String svg, String tooltip, boolean closeButton) {

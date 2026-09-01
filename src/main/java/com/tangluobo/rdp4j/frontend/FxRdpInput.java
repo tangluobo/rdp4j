@@ -53,15 +53,10 @@ public final class FxRdpInput implements RdpInput {
     private final ImageView target;
     private final StackPane mouseTarget;
     private final BiConsumer<Integer, Integer> pointerMovedListener;
+    private final Runnable focusGainedListener;
     private final Set<KeyCode> pressedKeys = EnumSet.noneOf(KeyCode.class);
     private final EventHandler<InputMethodEvent> inputMethodFilter = event -> event.consume();
-    private final ChangeListener<Boolean> focusListener = (observable, oldValue, focused) -> {
-        if (focused) {
-            gainedFocus();
-        } else {
-            lostFocus();
-        }
-    };
+    private final ChangeListener<Boolean> focusListener;
     private boolean capsLock;
     private boolean numLock = true;
     private boolean scrollLock;
@@ -73,11 +68,26 @@ public final class FxRdpInput implements RdpInput {
 
     public FxRdpInput(State state, FxRdpDisplay display,
                       BiConsumer<Integer, Integer> pointerMovedListener) {
+        this(state, display, pointerMovedListener, null);
+    }
+
+    FxRdpInput(State state, FxRdpDisplay display,
+               BiConsumer<Integer, Integer> pointerMovedListener,
+               Runnable focusGainedListener) {
         this.state = state;
         this.display = display;
         this.target = display.getImageView();
         this.mouseTarget = display.getView();
         this.pointerMovedListener = pointerMovedListener == null ? (x, y) -> { } : pointerMovedListener;
+        this.focusGainedListener = focusGainedListener == null ? () -> { } : focusGainedListener;
+        this.focusListener = (observable, oldValue, focused) -> {
+            if (focused) {
+                gainedFocus();
+                this.focusGainedListener.run();
+            } else {
+                lostFocus();
+            }
+        };
         installHandlers();
     }
 

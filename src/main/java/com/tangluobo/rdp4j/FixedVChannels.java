@@ -58,9 +58,11 @@ public class FixedVChannels extends VChannels {
             return;
         }
 
-        // 诊断：记录各通道数据包计数（每通道前2包和每100包打印一次）
+        // 诊断：记录各通道数据包计数。文件剪贴板会把大文件拆成数万
+        // 个约1.6KB分片，降低它的采样频率，避免同步日志拖慢下载。
         int count = channelPacketCounts.merge(mcsChannel, 1, Integer::sum);
-        if (count <= 2 || count % 100 == 0) {
+        int logInterval = "cliprdr".equals(channel.name()) ? 5000 : 100;
+        if (count <= 2 || count % logInterval == 0) {
             logger.info(String.format("[VCHAN] 通道%s(%s) 收到第%d个数据包, %d字节",
                     mcsChannel, channel.name(), count, packet.getEnd() - packet.getPosition()));
         }

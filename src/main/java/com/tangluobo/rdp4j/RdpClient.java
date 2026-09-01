@@ -61,6 +61,7 @@ public class RdpClient {
     private volatile boolean mapClipboard = true;
     private volatile boolean soundEnabled = true;
     private volatile RdpsndChannel rdpsndChannel;
+    private volatile FixedClipChannel clipboardChannel;
     private final AtomicLong attemptSequence = new AtomicLong();
     private final AtomicLong firstFrameNotifiedAttempt = new AtomicLong();
     private final AtomicBoolean disconnectNotified = new AtomicBoolean();
@@ -178,6 +179,7 @@ public class RdpClient {
 
     public RdpClient(RdpFrontend frontend) {
         this.frontend = Objects.requireNonNull(frontend, "frontend");
+        this.frontend.setFocusGainedListener(this::synchronizeClipboard);
     }
 
     /**
@@ -457,6 +459,7 @@ public class RdpClient {
             // UnicodeHandler编码bug（中文乱码）、远程→本地格式选择问题
             FixedClipChannel clipChannel = new FixedClipChannel();
             channels.register(clipChannel);
+            clipboardChannel = clipChannel;
             if (canvas.getDisplay() instanceof java.awt.Component component) {
                 component.addFocusListener(clipChannel);
             }
@@ -524,6 +527,7 @@ public class RdpClient {
 
     private void notifyDisconnected(String reason) {
         connected = false;
+        clearClipboardChannel();
         shutdownSoundChannel();
         frontend.disposeCanvas(canvas);
         if (disconnectNotified.compareAndSet(false, true) && onDisconnected != null) {
@@ -533,6 +537,7 @@ public class RdpClient {
 
     private long beginAttempt() {
         connected = false;
+        clearClipboardChannel();
         shutdownSoundChannel();
         long attemptId = attemptSequence.incrementAndGet();
         currentAttemptId = attemptId;
@@ -541,7 +546,16 @@ public class RdpClient {
 
     private void retireCurrentAttempt() {
         connected = false;
+        clearClipboardChannel();
         currentAttemptId = attemptSequence.incrementAndGet();
+    }
+
+    private void clearClipboardChannel() {
+        FixedClipChannel current = clipboardChannel;
+        clipboardChannel = null;
+        if (current != null) {
+            current.close();
+        }
     }
 
     /**
@@ -1172,6 +1186,14 @@ public class RdpClient {
             }
         };
         frontend.executeOnUiThread(synchronize);
+    }
+
+    /** Re-advertises local clipboard contents after the RDP view regains focus. */
+    public void synchronizeClipboard() {
+        FixedClipChannel current = clipboardChannel;
+        if (connected && mapClipboard && current != null) {
+            current.synchronizeLocalClipboard();
+        }
     }
 
     private RdesktopCanvas createFrontendCanvas(IContext context, State state) {

@@ -1,0 +1,167 @@
+{
+  "reflection": [
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$ComInterface",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$FormatEtc",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$StgMedium",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$StatStg",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$DataObjectVTable",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$StreamVTable",
+      "allDeclaredFields": true,
+      "allDeclaredConstructors": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$QueryInterfaceCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$AddRefCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$ReleaseCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$GetDataCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$QueryGetDataCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$CanonicalFormatCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$SetDataCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$EnumFormatCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$DAdviseCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$DUnadviseCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$EnumDAdviseCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$ReadCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$WriteCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$SeekCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$SetSizeCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$CopyToCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$CommitCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$RevertCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$RegionCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$StatCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$CloneCallback",
+      "jniAccessible": true,
+      "allDeclaredMethods": true
+    },
+    {
+      "type": {
+        "proxy": [
+          "com.sun.jna.platform.win32.Ole32"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$Ole32Extra"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$Kernel32Extra"
+        ]
+      }
+    },
+    {
+      "type": {
+        "proxy": [
+          "com.tangluobo.rdp4j.clipboard.WindowsVirtualFileClipboard$Shell32Extra"
+        ]
+      }
+    }
+  ]
+}

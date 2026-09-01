@@ -1,11 +1,13 @@
 package com.tangluobo.rdp4j.clipboard;
 
 import java.awt.Toolkit;
+import java.awt.EventQueue;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
 import java.awt.event.FocusEvent;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -17,6 +19,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -41,10 +48,9 @@ import com.tangluobo.rdp4j.rdp5.cliprdr.TypeHandler;
  * - 本地→远程：通告"FileGroupDescriptorW"命名格式（带FILECONTENTS标志），
  *   响应服务器的DATA_REQUEST（FILEGROUPDESW文件描述列表）与
  *   FILECONTENTS_REQUEST（SIZE/RANGE读取本地文件内容）。
- * - 远程→本地：收到服务器文件格式通告后拉取FILEGROUPDESW描述列表，
- *   按块FILECONTENTS_REQUEST下载文件到本地临时目录，
- *   完成后以javaFileListFlavor写入系统剪贴板（AWT映射为CF_HDROP，
- *   本地资源管理器可直接Ctrl+V粘贴）。
+ * - 远程→本地：Windows上把FILEGROUPDESW与按需FILECONTENTS流发布为
+ *   原生OLE IDataObject，由资源管理器读取远程流并显示微软复制进度窗口；
+ *   其他平台回退为下载到临时目录后发布javaFileListFlavor。
  */
 public class FixedClipChannel extends ClipChannel {
 
@@ -145,6 +151,14 @@ public class FixedClipChannel extends ClipChannel {
     private int streamSeq;
     /** 下载完成待放入剪贴板的文件 */
     private List<File> downloadedFiles;
+    /** 已发布到系统剪贴板、等待远程文件下载完成的延迟文件列表。 */
+    private volatile DeferredFileListTransferable remoteClipboardTransfer;
+    /** Windows Shell当前持有的原生虚拟文件数据对象。 */
+    private volatile WindowsVirtualFileClipboard windowsVirtualClipboard;
+    /** 原生IStream并发文件块请求：streamId -> 等待的响应。 */
+    private final Map<Integer, CompletableFuture<byte[]>> remoteReadRequests = new ConcurrentHashMap<>();
+    /** 每次远程剪贴板变更都会递增，防止旧IStream继续读取新剪贴板。 */
+    private volatile long remoteClipboardGeneration;
 
     public FixedClipChannel() {
         super();
@@ -247,7 +261,7 @@ public class FixedClipChannel extends ClipChannel {
                 break;
             case MSG_FILECONTENTS_RESPONSE:
                 // 远程文件数据块到达（远程→本地下载中）
-                handleFileContentsResponse(packet, dataLen);
+                handleFileContentsResponse(packet, dataLen, msgFlags);
                 break;
             case MSG_CAPS:
                 // 解析服务器能力通告：记录generalFlags用于长/短格式名协商
@@ -305,6 +319,11 @@ public class FixedClipChannel extends ClipChannel {
 
     @Override
     public void focusGained(FocusEvent e) {
+        synchronizeLocalClipboard();
+    }
+
+    /** Re-announces the current local clipboard after either AWT or JavaFX focus returns. */
+    public void synchronizeLocalClipboard() {
         try {
             if (state != null && state.isRDP5()) {
                 sendCapsIfNeeded();
@@ -365,8 +384,24 @@ public class FixedClipChannel extends ClipChannel {
      */
     private void announceLocalFormats() {
         try {
+            WindowsVirtualFileClipboard nativeClipboard = windowsVirtualClipboard;
+            if (nativeClipboard != null) {
+                if (nativeClipboard.ownsClipboard()) {
+                    // This is the remote virtual-file IDataObject we published.
+                    // Do not advertise it back to the same RDP server when the
+                    // RDP window regains focus.
+                    return;
+                }
+                windowsVirtualClipboard = null;
+            }
             Clipboard clip = getClipboard();
             Transferable t = clip == null ? null : clip.getContents(this);
+            if (t != null && t == remoteClipboardTransfer) {
+                // This clipboard originated from this RDP channel. Advertising
+                // it back to the same server creates an ownership loop and can
+                // restart a large remote-file transfer.
+                return;
+            }
             boolean hasText = t != null && t.isDataFlavorSupported(DataFlavor.stringFlavor);
 
             announcedFiles = null;
@@ -819,10 +854,131 @@ public class FixedClipChannel extends ClipChannel {
                 return;
             }
             logger.info("远程文件描述列表: " + remoteEntries.size() + "项");
+            if (publishWindowsVirtualFiles()) {
+                return;
+            }
             startRemoteDownload();
         } catch (Exception e) {
             logger.log(Level.WARNING, "解析远程文件描述列表失败: " + e.getMessage(), e);
             cancelRemoteDownload();
+        }
+    }
+
+    /**
+     * Windows本地资源管理器需要FileGroupDescriptorW + FileContents(IStream)
+     * 才能把RDP文件当作Shell虚拟文件，并用系统复制窗口展示真实流进度。
+     */
+    private boolean publishWindowsVirtualFiles() {
+        if (!WindowsVirtualFileClipboard.isSupported()) {
+            return false;
+        }
+        List<WindowsVirtualFileClipboard.Entry> entries = remoteEntries.stream()
+                .map(entry -> new WindowsVirtualFileClipboard.Entry(entry.name, entry.size, entry.dir))
+                .toList();
+        long generation = remoteClipboardGeneration;
+        WindowsVirtualFileClipboard clipboard = WindowsVirtualFileClipboard.publish(
+                entries, (fileIndex, offset, length) ->
+                        readRemoteVirtualFile(generation, fileIndex, offset, length));
+        if (clipboard == null) {
+            logger.warning("发布Windows原生虚拟文件剪贴板失败，回退到临时文件模式");
+            return false;
+        }
+        windowsVirtualClipboard = clipboard;
+        logger.info("远程文件已交给Windows Shell，粘贴时将按需读取RDP文件流");
+        return true;
+    }
+
+    private byte[] readRemoteVirtualFile(long generation, int fileIndex, long offset, int length)
+            throws IOException {
+        if (generation != remoteClipboardGeneration || remoteEntries == null
+                || fileIndex < 0 || fileIndex >= remoteEntries.size()) {
+            throw new IOException("远程剪贴板内容已变化");
+        }
+        RemoteFileEntry entry = remoteEntries.get(fileIndex);
+        if (entry.dir || offset < 0 || offset >= entry.size || length <= 0) {
+            return new byte[0];
+        }
+        int wanted = (int) Math.min(length, entry.size - offset);
+        ByteArrayOutputStream result = new ByteArrayOutputStream(wanted);
+        long position = offset;
+        while (result.size() < wanted) {
+            if (generation != remoteClipboardGeneration) {
+                throw new IOException("远程剪贴板内容已变化");
+            }
+            int requestLength = (int) Math.min(DOWNLOAD_CHUNK, wanted - result.size());
+            byte[] chunk = requestRemoteFileChunk(generation, fileIndex, position, requestLength);
+            if (chunk.length == 0) {
+                break;
+            }
+            int accepted = Math.min(chunk.length, wanted - result.size());
+            result.write(chunk, 0, accepted);
+            position += accepted;
+            if (accepted < requestLength) {
+                break;
+            }
+        }
+        return result.toByteArray();
+    }
+
+    private byte[] requestRemoteFileChunk(long generation, int fileIndex, long offset, int length)
+            throws IOException {
+        int streamId = nextStreamId();
+        CompletableFuture<byte[]> response = new CompletableFuture<>();
+        remoteReadRequests.put(streamId, response);
+        try {
+            Packet packet = createFileContentsRangeRequest(streamId, fileIndex, offset, length);
+            sendWithCommLock(packet);
+            byte[] data = response.get(120, TimeUnit.SECONDS);
+            if (generation != remoteClipboardGeneration) {
+                throw new IOException("远程剪贴板内容已变化");
+            }
+            return data;
+        } catch (TimeoutException error) {
+            throw new IOException("读取远程文件超时", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IOException("读取远程文件被中断", error);
+        } catch (java.util.concurrent.ExecutionException error) {
+            Throwable cause = error.getCause();
+            throw new IOException(cause == null ? error.getMessage() : cause.getMessage(), cause);
+        } catch (RdesktopException error) {
+            throw new IOException("发送远程文件读取请求失败: " + error.getMessage(), error);
+        } finally {
+            remoteReadRequests.remove(streamId);
+        }
+    }
+
+    private Packet createFileContentsRangeRequest(int streamId, int fileIndex,
+                                                   long offset, int length) {
+        Packet packet = new Packet(8 + 24);
+        packet.setLittleEndian16(MSG_FILECONTENTS_REQUEST);
+        packet.setLittleEndian16(0);
+        packet.setLittleEndian32(24);
+        packet.setLittleEndian32(streamId);
+        packet.setLittleEndian32(fileIndex);
+        packet.setLittleEndian32(FC_FLAG_RANGE);
+        packet.setLittleEndian32((int) (offset & 0xFFFFFFFFL));
+        packet.setLittleEndian32((int) (offset >>> 32));
+        packet.setLittleEndian32(length);
+        packet.markEnd();
+        return packet;
+    }
+
+    private synchronized int nextStreamId() {
+        return ++streamSeq;
+    }
+
+    private void sendWithCommLock(Packet packet) throws IOException, RdesktopException {
+        try {
+            state.getCommLock().acquire();
+            try {
+                send_packet(packet);
+            } finally {
+                state.getCommLock().release();
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IOException("发送剪贴板文件请求被中断", error);
         }
     }
 
@@ -832,8 +988,31 @@ public class FixedClipChannel extends ClipChannel {
     private void startRemoteDownload() throws IOException, RdesktopException {
         downloadRoot = Files.createTempDirectory("tomato-cliprdr-").toFile();
         downloadedFiles = new ArrayList<>();
+        DeferredFileListTransferable transfer = new DeferredFileListTransferable();
+        remoteClipboardTransfer = transfer;
+        publishRemoteFileClipboard(transfer);
         downloadIdx = 0;
         startNextRemoteFile();
+    }
+
+    private void publishRemoteFileClipboard(DeferredFileListTransferable transfer) {
+        Runnable publish = () -> {
+            if (remoteClipboardTransfer != transfer) {
+                return;
+            }
+            try {
+                getClipboard().setContents(transfer, this);
+                logger.info("远程文件剪贴板已就绪，粘贴将在下载完成后继续");
+            } catch (Exception error) {
+                transfer.cancel();
+                logger.log(Level.WARNING, "发布远程文件剪贴板失败: " + error.getMessage(), error);
+            }
+        };
+        if (EventQueue.isDispatchThread()) {
+            publish.run();
+        } else {
+            EventQueue.invokeLater(publish);
+        }
     }
 
     /**
@@ -883,30 +1062,38 @@ public class FixedClipChannel extends ClipChannel {
             return;
         }
         int cb = (int) Math.min(DOWNLOAD_CHUNK, remain);
-        pendingStreamId = ++streamSeq;
-        Packet p = new Packet(8 + 24);
-        p.setLittleEndian16(MSG_FILECONTENTS_REQUEST);
-        p.setLittleEndian16(0);
-        p.setLittleEndian32(24);
-        p.setLittleEndian32(pendingStreamId);
-        p.setLittleEndian32(downloadIdx);
-        p.setLittleEndian32(FC_FLAG_RANGE);
-        p.setLittleEndian32((int) (downloadOff & 0xFFFFFFFFL));
-        p.setLittleEndian32((int) (downloadOff >>> 32));
-        p.setLittleEndian32(cb);
-        p.markEnd();
-        send_packet(p);
+        pendingStreamId = nextStreamId();
+        send_packet(createFileContentsRangeRequest(
+                pendingStreamId, downloadIdx, downloadOff, cb));
     }
 
     /**
      * 处理FILECONTENTS_RESPONSE(9)：写入数据块并继续拉取。
      */
-    private void handleFileContentsResponse(Packet packet, int dataLen) {
+    private void handleFileContentsResponse(Packet packet, int dataLen, int msgFlags) {
         try {
-            if (dataLen < 4 || downloadOut == null) {
+            if (dataLen < 4) {
                 return;
             }
             int streamId = packet.getLittleEndian32();
+            CompletableFuture<byte[]> nativeRequest = remoteReadRequests.remove(streamId);
+            if (nativeRequest != null) {
+                if ((msgFlags & FLAG_OK) == 0) {
+                    nativeRequest.completeExceptionally(
+                            new IOException("远程服务器拒绝文件内容请求"));
+                    return;
+                }
+                int length = dataLen - 4;
+                byte[] data = new byte[Math.max(0, length)];
+                if (length > 0) {
+                    packet.copyToByteArray(data, 0, lastPacketStart + 12, length);
+                }
+                nativeRequest.complete(data);
+                return;
+            }
+            if (downloadOut == null) {
+                return;
+            }
             if (streamId != pendingStreamId) {
                 logger.warning("忽略不匹配的文件内容响应: streamId=" + streamId);
                 return;
@@ -934,7 +1121,12 @@ public class FixedClipChannel extends ClipChannel {
     private void finishRemoteDownload() {
         try {
             if (downloadedFiles != null && !downloadedFiles.isEmpty()) {
-                getClipboard().setContents(new FileListTransferable(downloadedFiles), this);
+                DeferredFileListTransferable transfer = remoteClipboardTransfer;
+                if (transfer != null) {
+                    transfer.complete(downloadedFiles);
+                } else {
+                    getClipboard().setContents(new FileListTransferable(downloadedFiles), this);
+                }
                 logger.info("远程文件已下载到本地剪贴板: " + downloadRoot
                         + " (" + downloadedFiles.size() + "项)");
             }
@@ -949,6 +1141,22 @@ public class FixedClipChannel extends ClipChannel {
      * 取消进行中的远程文件下载（新通告到达或出错时）。
      */
     private void cancelRemoteDownload() {
+        remoteClipboardGeneration++;
+        WindowsVirtualFileClipboard nativeClipboard = windowsVirtualClipboard;
+        windowsVirtualClipboard = null;
+        if (nativeClipboard != null) {
+            nativeClipboard.close();
+        }
+        IOException cancelled = new IOException("远程剪贴板文件传输已取消");
+        for (CompletableFuture<byte[]> request : remoteReadRequests.values()) {
+            request.completeExceptionally(cancelled);
+        }
+        remoteReadRequests.clear();
+        DeferredFileListTransferable transfer = remoteClipboardTransfer;
+        remoteClipboardTransfer = null;
+        if (transfer != null && !transfer.isReady()) {
+            transfer.cancel();
+        }
         descPending = false;
         remoteFileFormatId = -1;
         remoteEntries = null;
@@ -956,6 +1164,11 @@ public class FixedClipChannel extends ClipChannel {
         closeDownloadOut();
         downloadFile = null;
         downloadedFiles = null;
+    }
+
+    /** Releases a blocked native clipboard render when this RDP channel closes. */
+    public void close() {
+        cancelRemoteDownload();
     }
 
     private void closeDownloadOut() {

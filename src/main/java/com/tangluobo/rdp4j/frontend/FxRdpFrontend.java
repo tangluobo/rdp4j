@@ -19,6 +19,7 @@ public final class FxRdpFrontend implements RdpFrontend {
     private volatile FxRdpInput input;
     private volatile BiConsumer<Integer, Integer> pointerMovedListener = (x, y) -> { };
     private volatile BiConsumer<Integer, Integer> serverPointerMovedListener = (x, y) -> { };
+    private volatile Runnable focusGainedListener = () -> { };
 
     @Override
     public RdesktopCanvas createCanvas(IContext context, State state) {
@@ -41,7 +42,8 @@ public final class FxRdpFrontend implements RdpFrontend {
         FxRdpDisplay nextDisplay = new FxRdpDisplay(state.getWidth(), state.getHeight(),
                 this::notifyServerPointerMoved);
         RdesktopCanvas canvas = new RdesktopCanvas(context, state, nextDisplay, false);
-        FxRdpInput nextInput = new FxRdpInput(state, nextDisplay, this::notifyPointerMoved);
+        FxRdpInput nextInput = new FxRdpInput(state, nextDisplay,
+                this::notifyPointerMoved, this::notifyFocusGained);
         canvas.setInput(nextInput);
         display = nextDisplay;
         input = nextInput;
@@ -62,6 +64,15 @@ public final class FxRdpFrontend implements RdpFrontend {
 
     private void notifyServerPointerMoved(int x, int y) {
         serverPointerMovedListener.accept(x, y);
+    }
+
+    @Override
+    public void setFocusGainedListener(Runnable listener) {
+        focusGainedListener = listener == null ? () -> { } : listener;
+    }
+
+    void notifyFocusGained() {
+        focusGainedListener.run();
     }
 
     public Node getView() {

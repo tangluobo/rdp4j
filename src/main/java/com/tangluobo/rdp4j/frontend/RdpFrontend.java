@@ -13,6 +13,14 @@ public interface RdpFrontend {
         action.run();
     }
 
+    /**
+     * Receives focus notifications from toolkit-native desktop controls.
+     * Clipboard redirection uses this to re-announce local clipboard formats
+     * whenever the user returns to the RDP view.
+     */
+    default void setFocusGainedListener(Runnable listener) {
+    }
+
     default void disposeCanvas(RdesktopCanvas canvas) {
         if (canvas != null && canvas.getInput() != null) {
             canvas.getInput().dispose();
