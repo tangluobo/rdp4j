@@ -101,6 +101,7 @@ public final class FxRdpInput implements RdpInput {
         mouseTarget.setOnMouseReleased(this::mouseReleased);
         mouseTarget.setOnMouseMoved(this::mouseMoved);
         mouseTarget.setOnMouseDragged(this::mouseMoved);
+        mouseTarget.setOnMouseEntered(event -> display.restoreCursorPresentation());
         mouseTarget.setOnScroll(this::mouseScrolled);
         target.focusedProperty().addListener(focusListener);
     }
@@ -268,6 +269,7 @@ public final class FxRdpInput implements RdpInput {
 
     @Override
     public void gainedFocus() {
+        display.restoreCursorPresentation();
         synchronizeLockKeys();
         keypadLockSynchronizationPending = true;
     }
@@ -329,6 +331,7 @@ public final class FxRdpInput implements RdpInput {
         mouseTarget.setOnMouseReleased(null);
         mouseTarget.setOnMouseMoved(null);
         mouseTarget.setOnMouseDragged(null);
+        mouseTarget.setOnMouseEntered(null);
         mouseTarget.setOnScroll(null);
         target.focusedProperty().removeListener(focusListener);
     }

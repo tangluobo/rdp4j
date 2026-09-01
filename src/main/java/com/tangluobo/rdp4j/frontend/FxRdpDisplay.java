@@ -328,6 +328,20 @@ public final class FxRdpDisplay implements Display {
         runOnFxThread(update);
     }
 
+    /** Re-applies the last server cursor after this window regains mouse/focus. */
+    public void restoreCursorPresentation() {
+        runOnFxThread(() -> {
+            if ("hidden".equals(serverCursorMode)
+                    || frameCursorSuppressed || pointerPositionSuppressed) {
+                view.setCursor(Cursor.NONE);
+            } else if ("custom".equals(serverCursorMode)) {
+                view.setCursor(lastVisibleFxCursor);
+            } else {
+                view.setCursor(Cursor.DEFAULT);
+            }
+        });
+    }
+
     @Override
     public void movePointer(int x, int y) {
         runOnFxThread(() -> {

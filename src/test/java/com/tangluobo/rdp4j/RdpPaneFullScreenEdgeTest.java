@@ -92,6 +92,14 @@ class RdpPaneFullScreenEdgeTest {
     }
 
     @Test
+    void usesPersistentBorderlessFullScreenOnlyForMultipleMonitors() {
+        assertFalse(RdpPane.shouldUsePersistentFullScreen(0));
+        assertFalse(RdpPane.shouldUsePersistentFullScreen(1));
+        assertTrue(RdpPane.shouldUsePersistentFullScreen(2));
+        assertTrue(RdpPane.shouldUsePersistentFullScreen(3));
+    }
+
+    @Test
     void groupsEdgeDiagnosticsWithoutLoggingEveryMousePixel() {
         assertEquals(0, RdpPane.edgeDiagnosticBand(0));
         assertEquals(0, RdpPane.edgeDiagnosticBand(12));

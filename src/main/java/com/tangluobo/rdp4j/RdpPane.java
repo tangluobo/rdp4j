@@ -43,6 +43,7 @@ import javafx.scene.shape.Circle;
 import javafx.scene.shape.SVGPath;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 import javafx.stage.Window;
 import javafx.util.Duration;
 
@@ -86,6 +87,7 @@ public class RdpPane extends BorderPane {
     private Stage fullScreenOwnerStage;
     private boolean fullScreenOwnerWindowHidden;
     private boolean fullScreenTransitioning;
+    private boolean persistentMultiScreenFullScreen;
     private boolean remoteDesktopClosing;
     private int bestSceneEdgeBand = Integer.MAX_VALUE;
     private int bestLocalRemoteEdgeBand = Integer.MAX_VALUE;
@@ -271,7 +273,9 @@ public class RdpPane extends BorderPane {
             if (stage == null) {
                 return;
             }
-            if (!stage.isFullScreen()) {
+            if (persistentMultiScreenFullScreen) {
+                applyPersistentFullScreenBounds(stage);
+            } else if (!stage.isFullScreen()) {
                 restoreFullScreenOnFocus = true;
             }
             stage.setIconified(false);
@@ -343,6 +347,17 @@ public class RdpPane extends BorderPane {
             }
         });
         Stage stage = new Stage();
+        boolean persistentWindow = shouldUsePersistentFullScreen(Screen.getScreens().size());
+        persistentMultiScreenFullScreen = persistentWindow;
+        if (persistentWindow) {
+            // Native JavaFX full-screen is revoked by Windows as soon as this
+            // Stage loses focus. A borderless screen-sized Stage retains the
+            // full-screen presentation while the user works on another
+            // monitor, without stealing focus back from that application.
+            stage.initStyle(StageStyle.UNDECORATED);
+            stage.setResizable(false);
+            stage.setAlwaysOnTop(true);
+        }
         fullScreenStage = stage;
         restoreFullScreenOnFocus = false;
         stage.setTitle(ownerTab.getText() == null ? "远程桌面" : ownerTab.getText());
@@ -352,6 +367,9 @@ public class RdpPane extends BorderPane {
         stage.setFullScreenExitHint("");
         fullScreenTargetBounds = positionOnOwnerScreen(stage);
         stage.fullScreenProperty().addListener((observable, wasFullScreen, isFullScreen) -> {
+            if (persistentWindow) {
+                return;
+            }
             if (isFullScreen) {
                 restoreFullScreenOnFocus = false;
                 fullScreenMinimized = false;
@@ -378,6 +396,13 @@ public class RdpPane extends BorderPane {
             if (fullScreenTransitioning) {
                 return;
             }
+            if (persistentWindow) {
+                if (isFocused) {
+                    fullScreenMinimized = false;
+                    applyPersistentFullScreenBounds(stage);
+                }
+                return;
+            }
             if (!isFocused && stage.isFullScreen()) {
                 restoreFullScreenOnFocus = true;
                 logger.info(() -> "[FULLSCREEN_STATE] state=suspended-by-focus-loss, host=" + host);
@@ -387,6 +412,23 @@ public class RdpPane extends BorderPane {
         });
         stage.iconifiedProperty().addListener((observable, wasIconified, isIconified) -> {
             if (fullScreenStage != stage || fullScreenTransitioning) {
+                return;
+            }
+            if (persistentWindow) {
+                if (isIconified) {
+                    fullScreenMinimized = true;
+                    logger.info(() -> "[FULLSCREEN_STATE] state=minimized, mode=persistent, host=" + host);
+                } else if (fullScreenMinimized) {
+                    Platform.runLater(() -> {
+                        if (fullScreenStage != stage || stage.isIconified()) {
+                            return;
+                        }
+                        applyPersistentFullScreenBounds(stage);
+                        fullScreenMinimized = false;
+                        stage.toFront();
+                        stage.requestFocus();
+                    });
+                }
                 return;
             }
             if (isIconified) {
@@ -430,7 +472,12 @@ public class RdpPane extends BorderPane {
                 fullScreenTransitioning = false;
                 return;
             }
-            stage.setFullScreen(true);
+            if (persistentWindow) {
+                applyPersistentFullScreenBounds(stage);
+                hideOwnerWindowForFullScreen(stage);
+            } else {
+                stage.setFullScreen(true);
+            }
             fullScreenTransitioning = false;
             if (stage.isFocused()) {
                 activateNativeFullScreenKeyboard();
@@ -502,7 +549,8 @@ public class RdpPane extends BorderPane {
     }
 
     private void handleNativeFullScreenExit(Stage stage) {
-        if (fullScreenStage != stage || fullScreenTransitioning || stage.isFullScreen()) {
+        if (persistentMultiScreenFullScreen || fullScreenStage != stage
+                || fullScreenTransitioning || stage.isFullScreen()) {
             return;
         }
         if (shouldDeferFullScreenExit(stage.isFocused(), restoreFullScreenOnFocus)) {
@@ -516,7 +564,8 @@ public class RdpPane extends BorderPane {
     }
 
     private void restoreFullScreenAfterFocus(Stage stage) {
-        if (fullScreenStage != stage || fullScreenTransitioning || stage.isFullScreen()) {
+        if (persistentMultiScreenFullScreen || fullScreenStage != stage
+                || fullScreenTransitioning || stage.isFullScreen()) {
             return;
         }
         fullScreenTransitioning = true;
@@ -562,6 +611,10 @@ public class RdpPane extends BorderPane {
                                                boolean iconified,
                                                boolean fullScreen) {
         return minimizedForFullScreen && !iconified && !fullScreen;
+    }
+
+    static boolean shouldUsePersistentFullScreen(int screenCount) {
+        return screenCount > 1;
     }
 
     private HBox createExitBar() {
@@ -709,6 +762,8 @@ public class RdpPane extends BorderPane {
         fullScreenMinimized = false;
         fullScreenTargetBounds = null;
         fullScreenOwnerStage = null;
+        boolean persistentWindow = persistentMultiScreenFullScreen;
+        persistentMultiScreenFullScreen = false;
         applyFullScreenPresentation(false);
         // An independent window can suppress its bars while its initial size
         // is fitted to a windowed desktop. Once a full-screen desktop returns
@@ -728,6 +783,9 @@ public class RdpPane extends BorderPane {
             ownerStage.toFront();
         }
         stage.setOnCloseRequest(null);
+        if (persistentWindow) {
+            stage.setAlwaysOnTop(false);
+        }
         stage.hide();
         fullScreenOwnerWindowHidden = false;
         fullScreenTransitioning = false;
@@ -811,6 +869,20 @@ public class RdpPane extends BorderPane {
                 + ", owner=" + formatWindowBounds(targetOwner)
                 + ", target=" + target);
         return target;
+    }
+
+    private void applyPersistentFullScreenBounds(Stage stage) {
+        Rectangle2D target = fullScreenTargetBounds;
+        if (stage == null || target == null || fullScreenStage != stage) {
+            return;
+        }
+        stage.setX(target.getMinX());
+        stage.setY(target.getMinY());
+        stage.setWidth(target.getWidth());
+        stage.setHeight(target.getHeight());
+        if (!stage.isAlwaysOnTop()) {
+            stage.setAlwaysOnTop(true);
+        }
     }
 
     /** Returns the monitor occupied by most of the supplied window. */
@@ -1010,7 +1082,9 @@ public class RdpPane extends BorderPane {
         Bounds screenBounds = bar.localToScreen(bar.getLayoutBounds());
         logger.info(() -> "[FULLSCREEN_BAR] state=" + state
                 + ", host=" + host
-                + ", fullScreen=" + stage.isFullScreen()
+                + ", fullScreen=" + (stage.isFullScreen() || persistentMultiScreenFullScreen)
+                + ", nativeFullScreen=" + stage.isFullScreen()
+                + ", persistent=" + persistentMultiScreenFullScreen
                 + ", stage=" + stage.getX() + "," + stage.getY()
                 + " " + stage.getWidth() + "x" + stage.getHeight()
                 + ", visible=" + bar.isVisible()
@@ -1022,7 +1096,7 @@ public class RdpPane extends BorderPane {
     }
 
     private Rectangle2D resolveFullScreenEdgeBounds(Stage stage) {
-        if (stage.isFullScreen()) {
+        if (stage.isFullScreen() || persistentMultiScreenFullScreen) {
             var screens = Screen.getScreensForRectangle(stage.getX(), stage.getY(),
                     Math.max(1, stage.getWidth()), Math.max(1, stage.getHeight()));
             if (!screens.isEmpty()) {
@@ -1120,7 +1194,7 @@ public class RdpPane extends BorderPane {
         // leave full-screen. Keep the RDP node in this stage so restoring the
         // taskbar window can re-enter full-screen on the same monitor.
         fullScreenMinimized = true;
-        restoreFullScreenOnFocus = true;
+        restoreFullScreenOnFocus = !persistentMultiScreenFullScreen;
         stage.setIconified(true);
     }
 
